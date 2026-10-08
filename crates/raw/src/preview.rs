@@ -304,6 +304,66 @@ fn cr3_preview_boxes(bytes: &[u8]) -> Option<&[u8]> {
     best
 }
 
+/// DNG tag `PreviewApplicationName`: the program that rendered a preview IFD's image (DNG converters and
+/// raw developers write it; a camera's own preview doesn't).
+const PREVIEW_APPLICATION_NAME: u16 = 50966;
+
+/// A preview stored in a DNG: the JPEG, its size and the program that rendered it, if the file says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DngPreview {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// `PreviewApplicationName` of the IFD holding the image: `None` for a preview the camera wrote.
+    pub application: Option<String>,
+}
+
+/// Width and height from the first baseline/progressive SOF marker of a JPEG.
+fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2;
+    while i + 4 <= b.len() {
+        if b[i] != 0xff {
+            return None;
+        }
+        let m = b[i + 1];
+        if m == 0xff {
+            i += 1;
+            continue;
+        }
+        if matches!(m, 0xc0..=0xc2) {
+            let s = b.get(i + 5..i + 9)?;
+            return Some((u32::from(u16::from_be_bytes([s[2], s[3]])), u32::from(u16::from_be_bytes([s[0], s[1]]))));
+        }
+        if m == 0xda || m == 0xd9 {
+            return None;
+        }
+        i += 2 + usize::from(u16::from_be_bytes([b[i + 2], b[i + 3]]));
+    }
+    None
+}
+
+/// The smallest JPEG preview stored in a DNG whose long edge is at least `min_long_edge` px (the file's largest when
+/// none is that big), with the `PreviewApplicationName` of its IFD. Decoding a 4000 px preview to fit a 768 px proxy
+/// costs several times what a 1000 px one does. JPEG XL previews are not considered.
+pub fn dng_preview(bytes: &[u8], min_long_edge: u32) -> Option<DngPreview> {
+    let tiff = Tiff::parse(bytes).ok()?;
+    let mut all: Vec<DngPreview> = Vec::new();
+    for ifd in tiff.all_ifds() {
+        let mut found: Vec<&[u8]> = Vec::new();
+        candidates(bytes, ifd, 0, &mut found);
+        let application = ifd.string(PREVIEW_APPLICATION_NAME).map(|s| s.trim().trim_end_matches('\0').trim().to_string()).filter(|s| !s.is_empty());
+        for s in found.into_iter().filter(|s| is_dct_jpeg(s)) {
+            if let Some((width, height)) = jpeg_size(s) {
+                all.push(DngPreview { jpeg: trim_eoi(s).to_vec(), width, height, application: application.clone() });
+            }
+        }
+    }
+    let long = |p: &DngPreview| p.width.max(p.height);
+    let area = |p: &DngPreview| u64::from(p.width) * u64::from(p.height);
+    let covering = all.iter().filter(|p| long(p) >= min_long_edge).min_by_key(|p| area(p)).cloned();
+    covering.or_else(|| all.into_iter().max_by_key(|p| area(p)))
+}
+
 /// Trim trailing garbage after the last EOI when a stored length over-reports.
 fn trim_eoi(s: &[u8]) -> &[u8] {
     let end = s.windows(2).rposition(|w| w == [0xff, 0xd9]).map(|p| p + 2).unwrap_or(s.len());
@@ -322,6 +382,43 @@ mod tests {
         j
     }
 
+    /// A JPEG shell with the given size in its SOF marker.
+    fn sized_jpeg(w: u16, h: u16, n: usize) -> Vec<u8> {
+        let mut j = fake_jpeg(n);
+        j[7..9].copy_from_slice(&h.to_be_bytes());
+        j[9..11].copy_from_slice(&w.to_be_bytes());
+        j
+    }
+
+    fn preview_ifd(jpeg: Vec<u8>, application: Option<&str>) -> IfdBuilder {
+        let mut ifd = IfdBuilder::new();
+        ifd.set(t::COMPRESSION, Value::Short(vec![7]));
+        ifd.set(t::IMAGE_WIDTH, Value::Long(vec![2]));
+        ifd.set(t::IMAGE_LENGTH, Value::Long(vec![2]));
+        ifd.set(t::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
+        if let Some(name) = application {
+            ifd.set(PREVIEW_APPLICATION_NAME, Value::Ascii(name.to_string()));
+        }
+        ifd.set_image(ImageData::Strips { rows_per_strip: 2, strips: vec![jpeg] });
+        ifd
+    }
+
+    /// A DNG's preview for the camera-JPEG fit: the smallest one that covers the wanted size (the largest when none
+    /// does), with the name of the program that wrote it.
+    #[test]
+    fn dng_preview_is_the_smallest_covering_one_with_its_origin() {
+        let mut ifd0 = IfdBuilder::new();
+        ifd0.add_sub_ifd(preview_ifd(sized_jpeg(160, 120, 10), None));
+        ifd0.add_sub_ifd(preview_ifd(sized_jpeg(1024, 768, 300), None));
+        ifd0.add_sub_ifd(preview_ifd(sized_jpeg(4000, 3000, 900), Some("Adobe Camera Raw")));
+        let bytes = TiffWriter::default().write(&[ifd0]).unwrap();
+        let p = dng_preview(&bytes, 768).unwrap();
+        assert_eq!((p.width, p.height, p.application), (1024, 768, None));
+        let p = dng_preview(&bytes, 2000).unwrap();
+        assert_eq!((p.width, p.application.as_deref()), (4000, Some("Adobe Camera Raw")));
+        assert_eq!(dng_preview(&bytes, 5000).unwrap().width, 4000, "the largest when none covers");
+        assert!(dng_preview(b"nope", 768).is_none());
+    }
     #[test]
     fn picks_largest_dct_jpeg() {
         let small = fake_jpeg(10);

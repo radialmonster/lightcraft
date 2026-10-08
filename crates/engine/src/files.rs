@@ -370,7 +370,8 @@ fn load_bytes_now(
         // Without colour matrices of its own, white balance is relative to the as-shot look (`Photo::relative_wb`).
         let own_matrix = lightcraft_raw::color::has_matrix(&raw.color);
         // the source's segmentation mattes (DNG semantic masks), read while the starting colour is fitted
-        let ((xy, t, camera_look), mattes) = rayon::join(|| crate::camera_preview::starting_colour(&mut raw, &bytes), || dng_mattes(&bytes, &info));
+        let ((xy, t, camera_look), mattes) =
+            rayon::join(|| crate::camera_preview::starting_colour(&mut raw, &bytes, lens.as_ref()), || dng_mattes(&bytes, &info));
         drop(bytes);
         // Previews and thumbnails bin the mosaic straight to (about) the size they need; only
         // larger levels (exports, 1:1) demosaic the whole sensor.

@@ -1,10 +1,14 @@
 //! Estimate the starting look of a raw without a camera colour matrix (Sony ARW, Nikon NEF, Panasonic
 //! RW2, Fujifilm RAF, Canon CR2/CR3, Pentax PEF, Samsung SRW, Olympus ORF) from its own JPEG. Colour and luminance are fitted separately; the JPEG supplies correspondences only,
 //! never output pixels or a replacement for RAW editing.
+//! DNGs with their own colour matrix but no `ProfileToneCurve` get only their tone and chroma curves this way
+//! ([`dng_tone_from_preview`]); their colour stays the file's.
 //! A global matrix can't follow the camera's hue-dependent rendering (the best matrix rendered a
 //! lime shirt olive that the camera kept lime): a hue/saturation table fitted to the residuals
 //! (applied like a DNG `ProfileHueSatMap`) corrects that when it also improves the held-out pixels.
 use lightcraft_color::{D50, D65, Mat3, PROPHOTO, REC2020, Xy, bradford, luminance_2020};
+use lightcraft_develop::EmbeddedLens;
+use lightcraft_geom::{Orientation, Point};
 use lightcraft_pipeline::tone::{CameraTone, ToneMap};
 use lightcraft_raster::{
     Rgb32f,
@@ -23,7 +27,7 @@ use lightcraft_raw::{RawFormat, RawImage, color::CameraTransform, profile::HsvTa
 ///
 /// 1: the fit as of #499's follow-up; 2: Sony DRO (tone curve lowered to Sony's curve without DRO)
 /// and the ILCE-7CR profile (#528, #583, #568, #616).
-pub const LOOK_VERSION: u32 = 2;
+pub const LOOK_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CameraLook {
@@ -65,8 +69,21 @@ pub(crate) fn file_local_look(format: RawFormat) -> bool {
 /// the neutral fallback. The spectral matrices only stand in for the neutral fallback, so a photo whose JPEG fit is
 /// accepted renders as without them; when used they are written into `raw.color`. Returns the as-shot white, the
 /// camera transform at it and the fitted look.
-pub(crate) fn starting_colour(raw: &mut RawImage, bytes: &[u8]) -> (Xy, CameraTransform, Option<CameraLook>) {
-    starting_colour_with(raw, |raw, t| fit_preview(raw, bytes, t))
+///
+/// A DNG with its own colour matrix keeps its colour; if it qualifies ([`dng_tone_from_preview`]) its tone and chroma
+/// curves are fitted to its camera JPEG ([`fit_dng_tone`]; `lens` is the file's embedded lens correction, taken out
+/// of `raw`).
+pub(crate) fn starting_colour(raw: &mut RawImage, bytes: &[u8], lens: Option<&EmbeddedLens>) -> (Xy, CameraTransform, Option<CameraLook>) {
+    let (xy, t, look) = starting_colour_with(raw, |raw, t| fit_preview(raw, bytes, t));
+    let profile = &raw.color.profile;
+    let (make, model) = (raw.metadata.make.as_deref(), raw.metadata.model.as_deref());
+    if look.is_none()
+        && dng_tone_from_preview(raw.format, t.matrix_is_fallback, profile.tone_curve.is_some(), profile.gain_table_map.is_some(), make, model)
+    {
+        let look = fit_dng_tone(raw, bytes, &t, lens);
+        return (xy, t, look);
+    }
+    (xy, t, look)
 }
 
 /// [`starting_colour`] with the JPEG fit passed in (tests pin the order with it).
@@ -96,6 +113,72 @@ fn starting_colour_with(
     (xy, t, None)
 }
 
+/// Whether a raw's tone curve is fitted to its own camera JPEG while its colour stays the file's own
+/// ([`fit_dng_tone`]): a camera-written DNG with a colour matrix and neither a `ProfileToneCurve` (without one it
+/// would get the generic default tone, which renders the camera's mid-grey about 15 L* darker) nor a
+/// `ProfileGainTableMap` (local tone mapping the global curve would double). Phones are left out ([`is_phone`]): their
+/// JPEG is multi-frame computational photography, not a rendering of this raw. That the stored preview is the
+/// camera's own is checked on the preview itself ([`fit_dng_tone`]).
+pub(crate) fn dng_tone_from_preview(
+    format: RawFormat,
+    matrix_is_fallback: bool,
+    has_tone_curve: bool,
+    has_gain_table_map: bool,
+    make: Option<&str>,
+    model: Option<&str>,
+) -> bool {
+    format == RawFormat::Dng && !matrix_is_fallback && !has_tone_curve && !has_gain_table_map && !is_phone(make, model)
+}
+
+/// Whether a DNG's `Make`/`Model` name a phone camera. There is no tag that says so, so this is a list of the phone
+/// makers (a maker that also builds cameras is matched by its phone model prefixes): Apple, Google, OnePlus, Xiaomi
+/// and its sub-brands, Huawei and Honor, Oppo, vivo, realme, Motorola, Nothing, Fairphone, HMD and Nokia, Asus
+/// (`ASUS_` models), Samsung `SM-`/`GT-`, Sony `XQ-`/`SO-`/`SOG`/`SOV` and `Xperia`, LG, Sharp, Fujitsu `F-`/`arrows`.
+/// Samsung and Sony cameras (NX, ILCE, DSC) are not phones.
+pub(crate) fn is_phone(make: Option<&str>, model: Option<&str>) -> bool {
+    let make = make.unwrap_or_default().trim().to_ascii_lowercase();
+    let model = model.unwrap_or_default().trim().to_ascii_lowercase();
+    const MAKES: &[&str] = &[
+        "apple",
+        "google",
+        "oneplus",
+        "xiaomi",
+        "redmi",
+        "poco",
+        "huawei",
+        "honor",
+        "oppo",
+        "vivo",
+        "realme",
+        "motorola",
+        "nothing",
+        "fairphone",
+        "hmd",
+        "nokia",
+        "lge",
+        "lg electronics",
+        "sharp",
+        "meizu",
+        "zte",
+        "tecno",
+        "infinix",
+        "itel",
+        "blackberry",
+        "htc",
+        "essential",
+        "asus",
+    ];
+    if MAKES.iter().any(|m| make == *m || make.starts_with(&format!("{m} "))) {
+        return true;
+    }
+    let samsung =
+        make.contains("samsung") && (model.starts_with("sm-") || model.starts_with("gt-") || model.starts_with("sch-") || model.starts_with("sgh-"));
+    let sony = make.contains("sony")
+        && (model.starts_with("xq-") || model.starts_with("so-") || model.starts_with("sog") || model.starts_with("sov") || model.contains("xperia"));
+    samsung || sony || model.starts_with("iphone") || model.starts_with("pixel")
+}
+
+/// The starting look of `raw` from its own camera JPEG.
 pub(crate) fn fit_preview(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) -> Option<CameraLook> {
     if !transform.matrix_is_fallback || !file_local_look(raw.format) {
         return None;
@@ -242,12 +325,175 @@ fn at_most(a: &CameraTone, b: &CameraTone) -> bool {
     })
 }
 
+/// A DNG's tone curve fitted to its own camera JPEG ([`dng_tone_from_preview`]): the file's colour
+/// model (matrix, hue/saturation map, look table) is the given colour of the fit, so only the tone and
+/// chroma curves are fitted, under the same held-out gates. The preview is the smallest stored JPEG that
+/// covers the proxy ([`lightcraft_raw::dng_preview`]), at least [`MIN_DNG_PREVIEW`] px, and written by the
+/// camera (no `PreviewApplicationName`: an Adobe converter or raw developer names itself there, and its
+/// rendering is not the camera's). It must show the same picture as the raw ([`structure_agrees`]).
+fn fit_dng_tone(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, lens: Option<&EmbeddedLens>) -> Option<CameraLook> {
+    let refuse = |why: &str| {
+        if lightcraft_pipeline::profiling() {
+            eprintln!("[profile] DNG tone from the camera JPEG: refused ({why})");
+        }
+        None
+    };
+    let Some(preview) = lightcraft_raw::dng_preview(bytes, (2 * PROXY).max(384) as u32) else { return refuse("no JPEG preview") };
+    if let Some(app) = &preview.application {
+        return refuse(&format!("the preview was written by {app}, not the camera"));
+    }
+    if preview.width.max(preview.height) < MIN_DNG_PREVIEW {
+        return refuse("the preview is smaller than the minimum size");
+    }
+    let edge = (2 * PROXY).max(384) as u32;
+    let Some(decoded) =
+        lightcraft_codecs::decode(&preview.jpeg, lightcraft_codecs::DecodeOptions { max_size: Some((edge, edge)), max_pixels: 64_000_000 }).ok()
+    else {
+        return refuse("the preview doesn't decode");
+    };
+    let Some((mut sensor, reference, clipped)) = proxies_of(raw, decoded, transform, PROXY) else {
+        return refuse("no preview of the raw's aspect, or no binned sensor proxy");
+    };
+    // As the loader renders it: the profile's tables around the baseline exposure.
+    let xy = lightcraft_raw::color::as_shot_white_xy(raw);
+    if let Some(tables) = lightcraft_raw::profile::ProfileTables::new(&raw.color.profile, lightcraft_raw::color::illuminant_weight(&raw.color, xy)) {
+        let gain = 2f32.powf(transform.baseline_exposure as f32);
+        sensor.map_in_place(|p| tables.apply(p.map(|v| v / gain), gain));
+    }
+    correct_vignetting(&mut sensor, lens, raw.orientation);
+    if (sensor.width, sensor.height) != (reference.width, reference.height) {
+        return refuse("the preview and sensor proxies differ in size");
+    }
+    if !structure_agrees(&sensor, &reference) {
+        return refuse("the preview doesn't show the same picture");
+    }
+    let Some(look) = fit_given_colour(&sensor, &reference, &clipped) else {
+        return refuse("fit rejected");
+    };
+    if lightcraft_pipeline::profiling() {
+        eprintln!("[profile] DNG tone from the camera JPEG: {:?}", look.tone);
+    }
+    Some(look)
+}
+
+/// The tone and chroma curves for a sensor proxy that already has the file's colour (so the given colour model is
+/// the identity): the first of [`TONE_FITS`] (without the proxy pixels whose sensor values are clipped, then on all)
+/// that passes the gates. Never the photo's own matrix: that is the file's.
+fn fit_given_colour(sensor: &Rgb32f, reference: &Rgb32f, clipped: &[bool]) -> Option<CameraLook> {
+    let colour = Some((Mat3::IDENTITY, None));
+    let unclipped = without_clipped(sensor, clipped);
+    for pixels in unclipped.iter().chain(std::iter::once(sensor)) {
+        for tone in TONE_FITS {
+            for away_from_edges in [false, true] {
+                let attempt = Attempt { tone: *tone, profile: true, away_from_edges };
+                if let Some(look) = fit_attempt(pixels, reference, &colour, attempt) {
+                    return Some(look);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Multiply the sensor proxy (sensor orientation, default crop) by the embedded vignetting correction, the gain
+/// the pipeline applies to the render (`optics::embedded_vignette_gain`; `lens` is in the oriented, cropped frame).
+/// Without it a tone fitted to a vignetting-corrected camera JPEG brightens the render's corners twice: on
+/// iPhone DNGs (`FixVignetteRadial` up to 2× at the corners) the fitted renders came out about 8 L* too light.
+fn correct_vignetting(sensor: &mut Rgb32f, lens: Option<&EmbeddedLens>, orientation: Orientation) {
+    let Some(vignette) = lens.and_then(|l| l.vignette) else { return };
+    let (w, h) = (sensor.width as f64, sensor.height as f64);
+    let (ow, oh) = if orientation.swaps_axes() { (h, w) } else { (w, h) };
+    let width = sensor.width.max(1);
+    for (i, p) in sensor.data.iter_mut().enumerate() {
+        let (x, y) = orientation.map((i % width) as f64 + 0.5, (i / width) as f64 + 0.5, w, h);
+        let gain = lightcraft_pipeline::optics::embedded_vignette_gain(&vignette, Point::new(x, y), ow, oh) as f32;
+        *p = p.map(|v| v * gain);
+    }
+}
+
+/// Smallest long edge of a DNG preview the tone is fitted to: the size every reference is decoded at
+/// (phone DNGs carry 672–852 px previews; an old 160 px thumbnail is too coarse to pair).
+const MIN_DNG_PREVIEW: u32 = 384;
+
+/// Log-luminance correlation (5 × 5 box blurred, so fine texture and the few-pixel differences of an
+/// in-camera lens correction don't count) the unshifted proxies must reach.
+const MIN_STRUCTURE: f64 = 0.85;
+
+/// Whether the sensor proxy and the camera JPEG proxy show the same picture in the same place: their
+/// log luminance correlates by at least [`MIN_STRUCTURE`] unshifted, and no shift of more than one
+/// proxy pixel (within ±3) correlates better. The camera's tone curve is monotone, so an aligned pair
+/// correlates strongly whatever its tone; a mis-decoded raw, a broken preview or a differently framed
+/// one does not (the gates alone accepted a look fitted to mis-decoded samples).
+fn structure_agrees(sensor: &Rgb32f, reference: &Rgb32f) -> bool {
+    let (w, h) = (sensor.width, sensor.height);
+    if (w, h) != (reference.width, reference.height) || w < 16 || h < 16 || sensor.data.len() != w * h || reference.data.len() != w * h {
+        return false;
+    }
+    let log = |img: &Rgb32f| -> Vec<f64> {
+        let l: Vec<f64> =
+            img.data.iter().map(|p| f64::from(luminance_2020(p.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 }))).max(1e-4).ln()).collect();
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let (mut sum, mut n) = (0.0, 0.0);
+                for yy in y.saturating_sub(2)..(y + 3).min(h) {
+                    for xx in x.saturating_sub(2)..(x + 3).min(w) {
+                        if let Some(v) = l.get(yy * w + xx) {
+                            sum += v;
+                            n += 1.0;
+                        }
+                    }
+                }
+                sum / f64::max(n, 1.0)
+            })
+            .collect()
+    };
+    let (a, b) = (log(sensor), log(reference));
+    const M: usize = 3;
+    let corr = |dx: isize, dy: isize| -> f64 {
+        let (mut n, mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        for y in M..h - M {
+            for x in M..w - M {
+                let (xx, yy) = (x.saturating_add_signed(dx), y.saturating_add_signed(dy));
+                let (Some(&u), Some(&v)) = (a.get(y * w + x), b.get(yy * w + xx)) else { continue };
+                n += 1.0;
+                sa += u;
+                sb += v;
+                saa += u * u;
+                sbb += v * v;
+                sab += u * v;
+            }
+        }
+        let var = (saa - sa * sa / n) * (sbb - sb * sb / n);
+        if n < 2.0 || var <= 1e-12 { 0.0 } else { (sab - sa * sb / n) / var.sqrt() }
+    };
+    let at_zero = corr(0, 0);
+    let (mut best, mut shift) = (at_zero, (0isize, 0isize));
+    for dy in -(M as isize)..=M as isize {
+        for dx in -(M as isize)..=M as isize {
+            let c = corr(dx, dy);
+            if c > best + 1e-9 {
+                (best, shift) = (c, (dx, dy));
+            }
+        }
+    }
+    if lightcraft_pipeline::profiling() {
+        eprintln!("[profile] camera JPEG structure: correlation {at_zero:.3} unshifted, best {best:.3} at {shift:?}");
+    }
+    at_zero >= MIN_STRUCTURE && shift.0.abs() <= 1 && shift.1.abs() <= 1
+}
+
 /// Same-size proxies of the sensor (white-balanced, baseline exposure, through `transform`'s
 /// matrix: the generic camera ≈ sRGB model) and of the file's embedded camera JPEG (linear Rec.2020),
 /// and per proxy pixel whether any sensor sample it covers is clipped.
 fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usize) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
     let edge = (2 * size).max(384) as u32;
     let decoded = crate::files::decode_raw_preview(bytes, lightcraft_codecs::DecodeOptions { max_size: Some((edge, edge)), max_pixels: 64_000_000 })?;
+    proxies_of(raw, decoded, transform, size)
+}
+
+/// [`proxies`] for an already decoded preview.
+fn proxies_of(raw: &RawImage, decoded: lightcraft_codecs::Decoded, transform: &CameraTransform, size: usize) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
     let mut reference = decoded.to_working();
     let (a, crop) = (raw.active_area, raw.crop.clipped(raw.active_area.width, raw.active_area.height));
     if crop.width == 0 || crop.height == 0 || reference.width == 0 || reference.height == 0 {
@@ -268,8 +514,9 @@ fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usiz
         reference = reference.into_crop(x, y, w, h);
     }
     // Fixed, bounded proxy: the selected look cannot depend on thumbnail/export resolution.
-    let k = (crop.width.max(crop.height).div_ceil(edge as usize).max(2)).div_ceil(2) * 2;
-    let mut sensor = sensor_proxy(raw, k, edge as usize)?;
+    let edge = (2 * size).max(384);
+    let k = (crop.width.max(crop.height).div_ceil(edge).max(2)).div_ceil(2) * 2;
+    let mut sensor = sensor_proxy(raw, k, edge)?;
     let mut clipped = clip_mask(&sensor);
     let gain = 2f32.powf(transform.baseline_exposure as f32);
     let to_working = |p: [f32; 3]| transform.matrix.apply_f32(std::array::from_fn(|i| p[i] * transform.wb[i] * gain));
@@ -1501,7 +1748,7 @@ mod tests {
         assert!(crate::camera_profiles::get("ILCE-7M4").is_some());
         let camera = lightcraft_raw::spectral::find(Some("SONY"), "ILCE-7M4").unwrap();
         let mut raw = raw_of(RawFormat::Arw, "SONY", "ILCE-7M4", Default::default());
-        let (_, t, look) = starting_colour(&mut raw, &[]);
+        let (_, t, look) = starting_colour(&mut raw, &[], None);
         assert!(look.is_none());
         assert_eq!(raw.color.color_matrix, camera.color_matrix.map(Some));
         assert!(!t.matrix_is_fallback);
@@ -1523,13 +1770,13 @@ mod tests {
     #[test]
     fn a_camera_outside_the_table_keeps_the_fallback() {
         let mut raw = raw_of(RawFormat::Cr2, "Canon", "Canon EOS 7D", Default::default());
-        let (_, t, look) = starting_colour(&mut raw, &[]);
+        let (_, t, look) = starting_colour(&mut raw, &[], None);
         assert!(look.is_none() && t.matrix_is_fallback);
         assert_eq!(raw.color, lightcraft_raw::ColorData::default());
         // without a model there is no table row
         let mut raw = raw_of(RawFormat::Cr2, "Canon", "", Default::default());
         raw.metadata.model = None;
-        assert!(starting_colour(&mut raw, &[]).1.matrix_is_fallback);
+        assert!(starting_colour(&mut raw, &[], None).1.matrix_is_fallback);
     }
 
     /// The colour precedence on public raws (each skipped without its corpus file): a photo whose JPEG fit is
@@ -1552,7 +1799,7 @@ mod tests {
             let own = lightcraft_raw::color::has_matrix(&raw.color);
             let covered = raw.metadata.model.as_deref().and_then(|m| lightcraft_raw::spectral::find(raw.metadata.make.as_deref(), m)).is_some();
             let before = raw.color.clone();
-            let (_, t, fitted) = starting_colour(&mut raw, &bytes);
+            let (_, t, fitted) = starting_colour(&mut raw, &bytes, None);
             let spectral = !own && fitted.is_none() && covered;
             eprintln!("{name}: own matrices {own}, JPEG fit {}, spectral {spectral}", fitted.is_some());
             assert_eq!(raw.color != before, spectral, "{name}");
@@ -1997,6 +2244,261 @@ mod tests {
             assert_eq!(small.camera_tone.is_some(), accepted, "{name}");
             assert_eq!(small.camera_tone, large.camera_tone, "{name}: resolution changed the fit");
             assert!(small.raw && small.relative_wb && small.as_shot_temp == 6500.0 && small.as_shot_tint == 0.0, "{name}");
+        }
+    }
+
+    /// Which raws get their tone from their own camera JPEG: camera-written DNGs with a colour matrix and neither a
+    /// `ProfileToneCurve` nor a `ProfileGainTableMap`; phones and other formats are left out.
+    #[test]
+    fn dng_tone_from_preview_follows_the_files_own_tags() {
+        let (make, model) = (Some("RICOH"), Some("GR III"));
+        assert!(dng_tone_from_preview(RawFormat::Dng, false, false, false, make, model));
+        assert!(dng_tone_from_preview(RawFormat::Dng, false, false, false, None, None));
+        // the file's own tone curve, or local tone mapping, is kept
+        assert!(!dng_tone_from_preview(RawFormat::Dng, false, true, false, make, model));
+        assert!(!dng_tone_from_preview(RawFormat::Dng, false, false, true, make, model));
+        // without a colour matrix there is no colour to keep (and DNGs aren't in the full fit)
+        assert!(!dng_tone_from_preview(RawFormat::Dng, true, false, false, make, model));
+        // other formats keep their own path
+        for format in [RawFormat::Arw, RawFormat::Nef, RawFormat::Nrw, RawFormat::Rw2, RawFormat::Cr2, RawFormat::Raf, RawFormat::Orf, RawFormat::Pef]
+        {
+            assert!(!dng_tone_from_preview(format, false, false, false, make, model), "{format:?}");
+            assert!(!dng_tone_from_preview(format, true, false, false, make, model), "{format:?}");
+        }
+    }
+
+    /// Phones are recognised by maker and model; cameras of makers that also build phones are not.
+    #[test]
+    fn phones_are_told_from_cameras() {
+        for (make, model) in [
+            ("Apple", "iPhone 12 Pro"),
+            ("Google", "Pixel 7"),
+            ("samsung", "SM-S918B"),
+            ("OnePlus", "LE2123"),
+            ("Xiaomi", "2201123G"),
+            ("HUAWEI", "ELS-NX9"),
+            ("motorola", "moto g"),
+            ("OPPO", "CPH2305"),
+            ("vivo", "V2250"),
+            ("Sony", "XQ-DQ72"),
+            ("Sony", "Xperia 1 V"),
+            ("asus", "ASUS_AI2302"),
+            ("", "iPhone 8"),
+        ] {
+            assert!(is_phone(Some(make), Some(model)), "{make} {model}");
+        }
+        for (make, model) in [
+            ("RICOH IMAGING COMPANY, LTD.", "GR III"),
+            ("LEICA CAMERA AG", "LEICA M10-R"),
+            ("Panasonic", "DC-S1"),
+            ("SAMSUNG", "NX1"),
+            ("Sony", "ILCE-7RM5"),
+            ("Sony", "DSC-RX100M7"),
+            ("Canon", "Canon EOS R5"),
+            ("DJI", "FC3411"),
+            ("Hasselblad", "L2D-20c"),
+            ("PENTAX", "PENTAX K-1"),
+        ] {
+            assert!(!is_phone(Some(make), Some(model)), "{make} {model}");
+        }
+        assert!(!is_phone(None, None));
+    }
+
+    /// A smooth synthetic scene (sensor proxy) and its camera rendering, `dx` pixels to the right.
+    fn scene_pair(w: usize, h: usize, dx: usize) -> (Rgb32f, Rgb32f) {
+        let scene = |x: f32, y: f32| -> [f32; 3] {
+            let l = 0.03 + 0.4 * (0.5 + 0.5 * (x * 0.21).sin() * (y * 0.17).cos()) + 0.2 * ((x - 30.0).hypot(y - 20.0) < 12.0) as u8 as f32;
+            [l * (0.8 + 0.3 * (y / h as f32)), l, l * (1.1 - 0.4 * (x / w as f32))]
+        };
+        let camera = |p: [f32; 3]| {
+            let y = luminance_2020(p);
+            p.map(|v| v * (1.0 - (-2.5 * y).exp()) / y)
+        };
+        let mut sensor = Rgb32f::new(w, h);
+        let mut reference = sensor.clone();
+        for y in 0..h {
+            for x in 0..w {
+                sensor.data[y * w + x] = scene(x as f32, y as f32);
+                reference.data[y * w + x] = camera(scene(x as f32 - dx as f32, y as f32));
+            }
+        }
+        (sensor, reference)
+    }
+
+    /// The structural check accepts the same picture whatever its tone, and refuses a shifted, a
+    /// broken (stripes) or an unrelated preview, and proxies of different sizes.
+    #[test]
+    fn structure_agreement_refuses_shifted_broken_and_unrelated_previews() {
+        let (sensor, reference) = scene_pair(96, 64, 0);
+        assert!(structure_agrees(&sensor, &reference));
+        assert!(structure_agrees(&sensor, &scene_pair(96, 64, 1).1), "one proxy pixel (lens correction) is tolerated");
+        assert!(!structure_agrees(&sensor, &scene_pair(96, 64, 3).1), "differently framed");
+        let mut stripes = reference.clone();
+        for (i, p) in stripes.data.iter_mut().enumerate() {
+            *p = if (i / 96) % 4 < 2 { [0.6, 0.1, 0.5] } else { [0.05, 0.4, 0.1] };
+        }
+        assert!(!structure_agrees(&sensor, &stripes), "a broken preview");
+        let mut flat = reference.clone();
+        flat.data.fill([0.2; 3]);
+        assert!(!structure_agrees(&sensor, &flat));
+        assert!(!structure_agrees(&sensor, &scene_pair(95, 64, 0).1));
+    }
+
+    /// With the file's colour given (identity on the proxy, which already went through the DNG's
+    /// matrix), only the tone is fitted: the colour stays, and a camera that renders mid-grey brighter
+    /// than the default tone map is followed.
+    #[test]
+    fn dng_tone_keeps_the_files_colour_and_follows_the_camera_tone() {
+        let (mut sensor, mut reference) = scene_pair(96, 64, 0);
+        // some saturated pixels too (the fit's colour rule)
+        for image in [&mut sensor, &mut reference] {
+            for p in image.data.iter_mut().step_by(5) {
+                *p = [p[0] * 1.6, p[1], p[2] * 0.5];
+            }
+        }
+        let look = fit_given_colour(&sensor, &reference, &[]).expect("tone fitted");
+        assert_eq!(look.matrix, Mat3::IDENTITY);
+        assert!(look.hue_sat.is_none());
+        let (fitted, default) = (ToneMap::camera(&look.tone, 0.0, 0.0, 0.0), ToneMap::new(0.0, 0.0, 0.0));
+        let target = 1.0 - (-2.5f32 * 0.18).exp();
+        assert!((fitted.apply(0.18) - target).abs() < 0.02, "{} vs {target}", fitted.apply(0.18));
+        assert!(fitted.apply(0.18) > default.apply(0.18) + 0.05, "{} vs default {}", fitted.apply(0.18), default.apply(0.18));
+    }
+
+    /// The embedded vignetting correction reaches the sensor proxy as the pipeline applies it to the render: none at
+    /// the centre, the full gain at the corners, the same in every orientation of the sensor data.
+    #[test]
+    fn sensor_proxy_gets_the_embedded_vignetting_correction() {
+        use lightcraft_develop::EmbeddedVignette;
+        let lens =
+            EmbeddedLens { warp: None, vignette: Some(EmbeddedVignette { k: [1.0, 0.0, 0.0, 0.0, 0.0], center: Point::new(0.5, 0.5), radius: 0.6 }) };
+        let corrected = |orientation: Orientation| {
+            let mut proxy = Rgb32f::new(96, 64);
+            proxy.data.fill([0.2; 3]);
+            correct_vignetting(&mut proxy, Some(&lens), orientation);
+            proxy.data.iter().map(|p| p[1] / 0.2).collect::<Vec<f32>>()
+        };
+        let normal = corrected(Orientation::Normal);
+        let (centre, corner) = (normal[32 * 96 + 48], normal[0]);
+        assert!((centre - 1.0).abs() < 0.01 && (1.9..2.0).contains(&corner), "centre {centre}, corner {corner}");
+        let rotated = corrected(Orientation::from_exif(6));
+        assert!(normal.iter().zip(&rotated).all(|(a, b)| (a - b).abs() < 1e-4), "a centred correction doesn't depend on orientation");
+        let mut proxy = Rgb32f::new(96, 64);
+        proxy.data.fill([0.2; 3]);
+        correct_vignetting(&mut proxy, None, Orientation::Normal);
+        assert!(proxy.data.iter().all(|p| *p == [0.2; 3]));
+    }
+
+    fn corpus_file(name: &str) -> Option<Vec<u8>> {
+        let path = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"))
+            .join("raw")
+            .join(name);
+        let bytes = std::fs::read(&path).ok();
+        if bytes.is_none() {
+            eprintln!("skip: {} absent", path.display());
+        }
+        bytes
+    }
+
+    /// Mean CIE L* of an sRGB-encoded image.
+    fn mean_lightness(img: &lightcraft_raster::Rgba8) -> f64 {
+        use lightcraft_color::transfer::srgb_to_linear;
+        let sum: f64 = img
+            .data
+            .iter()
+            .map(|p| {
+                let [r, g, b] = [p[0], p[1], p[2]].map(|v| f64::from(srgb_to_linear(f32::from(v) / 255.0)));
+                let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                if y > 216.0 / 24389.0 { 116.0 * y.cbrt() - 16.0 } else { y * 24389.0 / 27.0 }
+            })
+            .sum();
+        sum / img.data.len().max(1) as f64
+    }
+
+    /// The decoded raw as the loader fits it (lens corrections taken out), its colour transform and lens data.
+    fn corpus_raw(bytes: &[u8]) -> (RawImage, CameraTransform, Option<EmbeddedLens>) {
+        let mut raw = lightcraft_raw::decode(bytes).unwrap();
+        let lens = crate::files::embedded_lens(&raw.info());
+        raw.opcodes.list3.retain(|op| !op.is_lens_correction());
+        let transform = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
+        (raw, transform, lens)
+    }
+
+    /// The look `starting_colour` gives a corpus raw.
+    fn corpus_look(raw: &mut RawImage, bytes: &[u8], lens: Option<&EmbeddedLens>) -> Option<CameraLook> {
+        starting_colour(raw, bytes, lens).2
+    }
+
+    /// The public Ricoh GR III DNG (skipped without the corpus) carries a colour matrix but no
+    /// `ProfileToneCurve`, so it rendered with the generic default tone, much darker than its camera
+    /// JPEG. Its tone is now fitted to that JPEG; its colour (matrix) and white balance stay the file's.
+    #[test]
+    fn corpus_dng_without_a_tone_curve_gets_its_tone_from_its_camera_jpeg() {
+        let Some(bytes) = corpus_file("dng-ricoh-gr3.dng") else { return };
+        let (mut raw, transform, lens) = corpus_raw(&bytes);
+        assert!(raw.color.profile.tone_curve.is_none() && !transform.matrix_is_fallback);
+        let look = corpus_look(&mut raw, &bytes, lens.as_ref()).expect("tone fitted to the camera JPEG");
+        assert_eq!(look.matrix, Mat3::IDENTITY, "the file's matrix is kept");
+        assert!(look.hue_sat.is_none(), "the file's colour tables are kept");
+        let (img, info) = crate::files::load_bytes(&bytes, 400).unwrap();
+        assert!(info.camera_tone.is_some());
+        // white balance: the file's absolute as-shot white, not the relative scale of fitted formats
+        let (temp, tint) = lightcraft_color::cct::xy_to_temp_tint(lightcraft_raw::color::as_shot_white_xy(&raw));
+        assert!(!info.relative_wb && info.as_shot_temp == temp.round() && info.as_shot_tint == tint.round());
+        // mean lightness against the camera JPEG, with the fitted tone and with the default one
+        let settings = lightcraft_develop::DevelopSettings::default();
+        let req = lightcraft_pipeline::RenderRequest::fit(400, 400);
+        let render = |info: &lightcraft_pipeline::SourceInfo| mean_lightness(&lightcraft_pipeline::render(&img, info, &settings, &req).image);
+        let camera = mean_lightness(&crate::files::embedded_preview_srgb(&bytes, 400).unwrap());
+        let fitted = render(&info) - camera;
+        let default = render(&lightcraft_pipeline::SourceInfo { camera_tone: None, ..info }) - camera;
+        eprintln!("GR III mean ΔL* vs its camera JPEG: default tone {default:.2}, fitted {fitted:.2}");
+        assert!(default < -4.0, "the default tone renders this file dark: ΔL* {default:.1}");
+        assert!(fitted.abs() < 3.0 && fitted.abs() < default.abs() / 2.0, "ΔL* {default:.1} → {fitted:.1}");
+    }
+
+    /// DNGs with their own `ProfileToneCurve` or `ProfileGainTableMap`, phone DNGs, and DNGs whose preview was
+    /// written by a program (`PreviewApplicationName`: Adobe converters, skipped without the corpus) keep exactly what
+    /// they had: no fit.
+    #[test]
+    fn corpus_dngs_that_fail_a_guard_are_not_fitted() {
+        let Some(bytes) = corpus_file("dng-ricoh-gr3.dng") else { return };
+        let (mut raw, _, lens) = corpus_raw(&bytes);
+        assert!(corpus_look(&mut raw, &bytes, lens.as_ref()).is_some(), "the unmodified file is fitted");
+        let guarded = |edit: &dyn Fn(&mut RawImage)| {
+            let (mut raw, _, lens) = corpus_raw(&bytes);
+            edit(&mut raw);
+            corpus_look(&mut raw, &bytes, lens.as_ref())
+        };
+        let curve = lightcraft_raw::profile::ToneCurve::from_tag(&[0.0, 0.0, 0.18, 0.3, 1.0, 1.0]);
+        assert!(guarded(&|r| r.color.profile.tone_curve = curve.clone()).is_none(), "the file's own tone curve is used");
+        let map = lightcraft_raw::gaintable::GainTableMap {
+            points_v: 1,
+            points_h: 2,
+            points_n: 1,
+            spacing_v: 1.0,
+            spacing_h: 1.0,
+            origin_v: 0.0,
+            origin_h: 0.0,
+            weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0, 0.0],
+            gamma: 1.0,
+            gains: vec![1.0, 4.0],
+        };
+        assert!(guarded(&|r| r.color.profile.gain_table_map = Some(map.clone())).is_none(), "local tone mapping is the file's");
+        assert!(
+            guarded(&|r| (r.metadata.make, r.metadata.model) = (Some("Apple".into()), Some("iPhone 12 Pro".into()))).is_none(),
+            "phones are left out"
+        );
+        for name in ["dng-adobe-canon-5d3-linear-lj92.dng", "dng-adobe-canon-5d3-lj92.dng", "dng-adobe-canon-5d3-lossy.dng"] {
+            let Some(bytes) = corpus_file(name) else { return };
+            let preview = lightcraft_raw::dng_preview(&bytes, 384).expect("a preview");
+            assert!(preview.application.is_some(), "{name}: the converter names itself");
+            let (mut raw, _, lens) = corpus_raw(&bytes);
+            assert!(corpus_look(&mut raw, &bytes, lens.as_ref()).is_none(), "{name}");
+            let (_, info) = crate::files::load_bytes(&bytes, 400).unwrap();
+            assert!(info.camera_tone.is_none(), "{name}");
         }
     }
 
