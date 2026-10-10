@@ -35,21 +35,28 @@ impl RawImage {
     /// not oriented). `None` when the data cannot be binned ([`RawImage::can_bin`]) or carries an
     /// `OpcodeList3` (whose operations are defined at full resolution); callers then demosaic.
     pub fn develop_binned(&self, k: usize, clip: f32) -> Result<Option<Rgb32f>> {
-        Ok(self.bin(k, clip, true)?.map(|(img, _)| img))
+        Ok(self.bin(k, clip, true, true)?.map(|(img, _)| img))
+    }
+
+    /// [`RawImage::develop_binned`] for a raw with an `OpcodeList3`, which is left out (a lens warp and a vignetting
+    /// gain are defined at full resolution). For fitting a tone to a sensor proxy, where the warp is a few proxy
+    /// pixels at most and the caller applies the gain itself.
+    pub fn develop_binned_without_list3(&self, k: usize, clip: f32) -> Result<Option<Rgb32f>> {
+        Ok(self.bin(k, clip, true, false)?.map(|(img, _)| img))
     }
 
     /// Like [`RawImage::develop_binned`], with every channel the mean of its block's samples, and the
     /// clip mask: per output pixel, bits [`crate::highlight::CLIPPED_R`] / `_G` / `_B` for the colours
     /// with a sample at or above `clip` in the block. Hand both to [`crate::highlight::reconstruct_masked`].
     pub fn develop_binned_masked(&self, k: usize, clip: f32) -> Result<Option<(Rgb32f, Vec<u8>)>> {
-        self.bin(k, clip, false)
+        self.bin(k, clip, false, true)
     }
 
     /// The binned image and its clip mask; `keep_max`: a channel with a clipped sample takes the
     /// block's maximum sample of the colour instead of the mean.
-    fn bin(&self, k: usize, clip: f32, keep_max: bool) -> Result<Option<(Rgb32f, Vec<u8>)>> {
+    fn bin(&self, k: usize, clip: f32, keep_max: bool, with_list3: bool) -> Result<Option<(Rgb32f, Vec<u8>)>> {
         self.validate()?;
-        if !self.can_bin(k) || !self.opcodes.list3.is_empty() {
+        if !self.can_bin(k) || (with_list3 && !self.opcodes.list3.is_empty()) {
             return Ok(None);
         }
         let Some(cfa) = &self.cfa else { return Ok(None) };
@@ -195,6 +202,17 @@ mod tests {
         let xb = x.develop_binned(3, 0.99).unwrap().unwrap();
         assert_eq!((xb.width, xb.height), (8, 6));
         assert!((xb.get(4, 3)[2] - 0.3).abs() < 2e-3);
+    }
+
+    /// A raw with an `OpcodeList3` has no binned development, but the tone fit's proxy leaves the list out.
+    #[test]
+    fn a_raw_with_an_opcode_list3_bins_only_without_it() {
+        let img = Rgb32f::from_fn(24, 18, |x, y| [0.1 + x as f32 * 0.01, 0.2 + y as f32 * 0.01, 0.3]);
+        let mut raw = raw_from(&mosaic_from_rgb(&img, &Cfa::bayer("GRBG").unwrap()), 512.0, 16383.0);
+        let plain = raw.develop_binned(2, 0.99).unwrap().unwrap();
+        raw.opcodes.list3 = vec![Opcode::FixVignetteRadial { k: [0.0; 5], center: [0.5, 0.5] }];
+        assert!(raw.develop_binned(2, 0.99).unwrap().is_none(), "defined at full resolution");
+        assert_eq!(raw.develop_binned_without_list3(2, 0.99).unwrap().unwrap(), plain);
     }
 
     /// Issue #548: specular points that clip one green sample in some 8 × 8 blocks of a grey surface.

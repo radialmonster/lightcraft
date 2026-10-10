@@ -214,6 +214,8 @@ pub(crate) struct CameraColourModel<'a> {
     pub tables: Option<&'a lightcraft_raw::profile::ProfileTables>,
     /// A fitted camera look's hue/saturation table.
     pub hue_sat: Option<&'a crate::camera_preview::HueSat<'a>>,
+    /// A fitted camera look's chroma matrix per luminance band (after the hue/saturation table).
+    pub bands: Option<&'a crate::camera_preview::ChromaBands>,
 }
 
 impl CameraColourModel<'_> {
@@ -243,7 +245,8 @@ impl CameraColourModel<'_> {
                 Some(tables) => tables.apply(rgb, gain),
                 None => rgb.map(|v| v * gain),
             };
-            self.hue_sat.map_or(rgb, |h| h.apply(rgb)).map(|v| v.max(0.0))
+            let rgb = self.hue_sat.map_or(rgb, |h| h.apply(rgb));
+            self.bands.map_or(rgb, |b| b.apply(rgb)).map(|v| v.max(0.0))
         });
     }
 }
@@ -403,6 +406,7 @@ fn load_bytes_now(
             gain: 2f32.powf(t.baseline_exposure as f32),
             tables: tables.as_ref(),
             hue_sat: hue_sat.as_ref(),
+            bands: camera_look.as_ref().and_then(|p| p.bands.as_ref()),
         };
         // camera RGB → what the pipeline takes: clipped highlights rebuilt, white balance and the colour model applied,
         // fitted to `max_edge` and upright (the same for the plain and the denoised picture)
@@ -1028,7 +1032,7 @@ mod tests {
             let m = model.to_f32();
             let out: [f32; 3] = std::array::from_fn(|i| m[i][0] * w[0] + m[i][1] * w[1] + m[i][2] * w[2]);
             assert!(out.iter().all(|v| (v - out[1]).abs() <= 1e-3 * out[1]), "{w:?} renders {out:?}");
-            let colour = CameraColourModel { wb: [2.5, 1.0, 1.6], matrix: model, gain: 1.0, tables: None, hue_sat: None };
+            let colour = CameraColourModel { wb: [2.5, 1.0, 1.6], matrix: model, gain: 1.0, tables: None, hue_sat: None, bands: None };
             let mut img = Rgb32f::filled(4, 4, [1.0; 3]);
             colour.rebuild_highlights(&mut img);
             colour.apply(&mut img);
@@ -1043,7 +1047,7 @@ mod tests {
     fn clipped_highlights_stay_neutral_when_darkened() {
         use lightcraft_pipeline::{RenderRequest, render};
         let wb = [2.4f32, 1.0, 1.6];
-        let colour = CameraColourModel { wb, matrix: yellowing_look(), gain: 1.0, tables: None, hue_sat: None };
+        let colour = CameraColourModel { wb, matrix: yellowing_look(), gain: 1.0, tables: None, hue_sat: None, bands: None };
         // a grey wall (camera neutral) with a fully clipped light and a light clipped in green only
         let mut img = Rgb32f::from_fn(96, 64, |x, y| {
             let d = |cx: f32| ((x as f32 - cx).powi(2) + (y as f32 - 32.0).powi(2)).sqrt();
@@ -1079,7 +1083,7 @@ mod tests {
     fn darkened_ramp(rows: std::ops::Range<usize>, height: usize) -> ([[u8; 4]; 3], u8) {
         use lightcraft_pipeline::{RenderRequest, render};
         let wb = [2.5f32, 1.0, 1.6];
-        let colour = CameraColourModel { wb, matrix: lightcraft_color::Mat3::IDENTITY, gain: 1.0, tables: None, hue_sat: None };
+        let colour = CameraColourModel { wb, matrix: lightcraft_color::Mat3::IDENTITY, gain: 1.0, tables: None, hue_sat: None, bands: None };
         let w = 1600usize;
         let k = |x: usize| 0.8 + 0.55 * x as f32 / (w - 1) as f32;
         let sensor =
@@ -1137,7 +1141,7 @@ mod tests {
     fn second_clip(top: usize, strip: usize, band: usize) -> ([[u8; 4]; 2], u8) {
         use lightcraft_pipeline::{RenderRequest, render};
         let wb = [2.5f32, 1.0, 1.6];
-        let colour = CameraColourModel { wb, matrix: lightcraft_color::Mat3::IDENTITY, gain: 1.0, tables: None, hue_sat: None };
+        let colour = CameraColourModel { wb, matrix: lightcraft_color::Mat3::IDENTITY, gain: 1.0, tables: None, hue_sat: None, bands: None };
         let (w, h) = (320usize, top + strip + band);
         let sensor = Rgb32f::from_fn(w, h, |x, y| {
             if y < top {

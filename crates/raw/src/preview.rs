@@ -117,6 +117,24 @@ fn candidates<'a>(data: &'a [u8], ifd: &Ifd, base: u64, out: &mut Vec<&'a [u8]>)
     }
 }
 
+/// Maker-note preview IFDs (e.g. Nikon PreviewIFD 0x0011 holds JPEGInterchangeFormat relative to the note base; a
+/// Leica M (Typ 240) DNG keeps its 1472 px preview in the note).
+fn makernote_candidates<'a>(tiff: &Tiff, bytes: &'a [u8], found: &mut Vec<&'a [u8]>) {
+    if let Some(exif) = tiff.exif()
+        && let Some(e) = exif.get(t::MAKER_NOTE)
+    {
+        let make = tiff.find(t::MAKE).and_then(|e| e.value.as_str()).unwrap_or_default();
+        if let Some(mn) = makernote::parse_makernote(bytes, e.offset, e.count() as u64, tiff.order, &make) {
+            candidates(bytes, &mn.ifd, mn.base, found);
+            if let Some(off) = mn.ifd.u64(0x0011)
+                && let Ok((pifd, _)) = lightcraft_tiff::parse_ifd_at(bytes, mn.base + off, mn.order, mn.base, false, &Default::default())
+            {
+                candidates(bytes, &pifd, mn.base, found);
+            }
+        }
+    }
+}
+
 /// The largest embedded preview, if any: a JPEG, or (DNG 1.7) a JPEG XL file — both decode with
 /// `lightcraft_codecs::decode`.
 pub fn embedded_preview(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -136,20 +154,7 @@ pub fn embedded_preview(bytes: &[u8]) -> Option<Vec<u8>> {
     for ifd in tiff.all_ifds() {
         candidates(bytes, ifd, 0, &mut found);
     }
-    // maker-note preview IFDs (e.g. Nikon PreviewIFD 0x0011 holds JPEGInterchangeFormat relative to the note base)
-    if let Some(exif) = tiff.exif()
-        && let Some(e) = exif.get(t::MAKER_NOTE)
-    {
-        let make = tiff.find(t::MAKE).and_then(|e| e.value.as_str()).unwrap_or_default();
-        if let Some(mn) = makernote::parse_makernote(bytes, e.offset, e.count() as u64, tiff.order, &make) {
-            candidates(bytes, &mn.ifd, mn.base, &mut found);
-            if let Some(off) = mn.ifd.u64(0x0011)
-                && let Ok((pifd, _)) = lightcraft_tiff::parse_ifd_at(bytes, mn.base + off, mn.order, mn.base, false, &Default::default())
-            {
-                candidates(bytes, &pifd, mn.base, &mut found);
-            }
-        }
-    }
+    makernote_candidates(&tiff, bytes, &mut found);
     // Olympus: CameraSettings preview
     if let Some(p) = crate::vendor::orf::preview(bytes) {
         found.push(p);
@@ -356,6 +361,14 @@ pub fn dng_preview(bytes: &[u8], min_long_edge: u32) -> Option<DngPreview> {
             if let Some((width, height)) = jpeg_size(s) {
                 all.push(DngPreview { jpeg: trim_eoi(s).to_vec(), width, height, application: application.clone() });
             }
+        }
+    }
+    // the camera's maker note (no preview application name: it is the camera's own)
+    let mut note: Vec<&[u8]> = Vec::new();
+    makernote_candidates(&tiff, bytes, &mut note);
+    for s in note.into_iter().filter(|s| is_dct_jpeg(s)) {
+        if let Some((width, height)) = jpeg_size(s) {
+            all.push(DngPreview { jpeg: trim_eoi(s).to_vec(), width, height, application: None });
         }
     }
     let long = |p: &DngPreview| p.width.max(p.height);

@@ -31,6 +31,8 @@ pub enum MakerNoteKind {
     PentaxAoc,
     /// `PENTAX \0` + byte order: IFD at +10, offsets relative to the note start.
     Pentax,
+    /// `LEICA\0\x02\xff` (Leica M Typ 240 and its generation): IFD at +8, offsets relative to the TIFF header.
+    Leica6,
 }
 
 /// A parsed maker-note IFD.
@@ -93,6 +95,9 @@ pub fn parse_makernote(data: &[u8], offset: u64, len: u64, order: ByteOrder, mak
     if note.starts_with(b"PENTAX \0") {
         let ord = order_at(8).unwrap_or(order);
         return try_parse(MakerNoteKind::Pentax, offset + 10, offset, ord);
+    }
+    if note.starts_with(b"LEICA\0\x02\xff") {
+        return try_parse(MakerNoteKind::Leica6, offset + 8, 0, order);
     }
     if (note.starts_with(b"SONY") || note.starts_with(b"VHAB     \0"))
         && let Some(m) = try_parse(MakerNoteKind::Sony, offset + 12, 0, order)
@@ -174,6 +179,22 @@ mod tests {
         assert_eq!(m.kind, MakerNoteKind::Fujifilm);
         assert_eq!(m.order, ByteOrder::Little);
         assert_eq!(m.ifd.u64s(2).unwrap(), vec![5, 6]);
+    }
+
+    #[test]
+    fn leica6_ifd_follows_the_eight_byte_header() {
+        let order = ByteOrder::Big;
+        let mut note = b"LEICA\0\x02\xff".to_vec();
+        note.extend(tiny_ifd(order, 0));
+        note.extend_from_slice(&[0; 8]);
+        let (mut bytes, off, len) = with_note(order, note);
+        let values_abs = off as u32 + 8 + 30;
+        bytes[off as usize + 8 + 22..off as usize + 8 + 26].copy_from_slice(&values_abs.to_be_bytes());
+        bytes[off as usize + 8 + 30..off as usize + 8 + 34].copy_from_slice(&9u32.to_be_bytes());
+        let m = parse_makernote(&bytes, off, len, order, "Leica Camera AG").unwrap();
+        assert_eq!(m.kind, MakerNoteKind::Leica6);
+        assert_eq!(m.ifd.u32(1), Some(7));
+        assert_eq!(m.ifd.u64s(2).unwrap(), vec![9, 0]);
     }
 
     #[test]
