@@ -319,7 +319,8 @@ pub fn tag_rows(tiff: &Tiff) -> Vec<TagRow> {
         if let Some(c) = raw_image_ifd(ifd0).and_then(|r| r.value(0x0103))
             && let Some(row) = out.iter_mut().find(|r| r.tag == 0x0103)
         {
-            row.value = value_text("TIFF", 0x0103, c);
+            // lossless JPEG (DNG, CR2) on the sensor image; plain "JPEG" would read as lossy
+            row.value = if c.get_u64(0) == Some(7) { "Lossless JPEG".to_string() } else { value_text("TIFF", 0x0103, c) };
         }
         if let Some(e) = &ifd0.exif {
             rows_of("EXIF", e, &mut out);
@@ -440,6 +441,19 @@ mod tests {
             let b = synthetic_raw(Some(v));
             assert_eq!(compression(&file_tag_rows(&b)), [words]);
         }
+    }
+
+    #[test]
+    fn dng_raw_sub_ifd_jpeg_is_lossless_but_a_plain_jpeg_tiff_is_not() {
+        let b = synthetic_raw(None);
+        // switch the sensor sub-IFD's Compression from 34713 to 7
+        let pos = b.windows(12).position(|w| w == entry(0x0103, 3, 1, 34713).as_slice()).unwrap();
+        let mut dng = b.clone();
+        dng[pos + 8] = 7;
+        dng[pos + 9] = 0;
+        assert_eq!(compression(&file_tag_rows(&dng)), ["Lossless JPEG"]);
+        let plain = [b"II*    ".to_vec(), ifd(&[entry(0x0103, 3, 1, 7)])].concat();
+        assert_eq!(compression(&file_tag_rows(&plain)), ["JPEG"]);
     }
 
     #[test]
