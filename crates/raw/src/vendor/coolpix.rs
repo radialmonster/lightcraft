@@ -1,4 +1,4 @@
-//! Two-field Nikon Coolpix raws: E5700 (CYGM four-colour filter) and E8400 (RGB Bayer).
+//! Two-field Nikon Coolpix raws: E5700 (CYGM four-colour filter), E8400 and E8800 (RGB Bayer).
 //!
 //! The layout was measured clean-room by black-box analysis of the CC0 raw.pixls.us files (E5700 2576 x 1924,
 //! E8400 3280 x 2454; log under `data/testing/flash-coolpix`, not committed), not taken from any other raw converter:
@@ -36,7 +36,7 @@ pub(crate) struct TwoField {
 pub(crate) fn layout(model: &str, w: usize, h: usize) -> Option<TwoField> {
     match (model.trim(), w, h) {
         ("E5700", 2576, 1924) => Some(TwoField { first_field_even: false, cygm: true }),
-        ("E8400", 3280, 2454) => Some(TwoField { first_field_even: true, cygm: false }),
+        ("E8400" | "E8800", 3280, 2454) => Some(TwoField { first_field_even: true, cygm: false }),
         _ => None,
     }
 }

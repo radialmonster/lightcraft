@@ -152,7 +152,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
     Ok(img)
 }
 
-/// The two-field Coolpix raws (E5700 CYGM, E8400 Bayer; see [`coolpix`]) when `info` is exactly the measured layout:
+/// The two-field Coolpix raws (E5700 CYGM, E8400 and E8800 Bayer; see [`coolpix`]) when `info` is exactly the measured layout:
 /// the model, the size, an uncompressed 12-bit single-channel single strip of `w * h * 1.5` bytes and, for the
 /// CYGM model, the `[5, 3, 1, 4]` colour-filter tag. `None` leaves every other file to the ordinary path.
 fn two_field_coolpix(bytes: &[u8], tiff: &Tiff, raw: &Ifd, info: &ImageInfo) -> Option<Result<RawImage>> {
@@ -476,6 +476,16 @@ mod tests {
         assert_eq!(r.data, RawData::U16(img));
         assert_eq!(r.cfa.as_ref().unwrap().name(), "BGGR");
         assert_eq!((r.black.values.as_slice(), r.white.as_slice()), (&[0.0][..], &[4095.0][..]));
+    }
+
+    #[test]
+    fn coolpix_e8800_has_the_e8400_layout() {
+        let (w, h) = (3280usize, 2454usize);
+        let img: Vec<u16> = (0..w * h).map(|i| ((i / w) * 7 + (i % w) * 3 % 1000) as u16 % 4096).collect();
+        let r = crate::decode(&coolpix_file("E8800", [2, 1, 1, 0], w, h, &two_fields(&img, w, h, true))).unwrap();
+        assert_eq!((r.width, r.height, r.cpp), (w, h, 1));
+        assert_eq!(r.data, RawData::U16(img));
+        assert_eq!(r.cfa.as_ref().unwrap().name(), "BGGR");
     }
 
     #[test]
