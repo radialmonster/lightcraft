@@ -219,8 +219,19 @@ pub(crate) struct CameraColourModel<'a> {
 impl CameraColourModel<'_> {
     /// Rebuild sensor-clipped channels; fully clipped highlights become [`clipped_white`] of the matrix, so they
     /// come out of [`Self::apply`] neutral.
+    #[cfg(test)]
     pub fn rebuild_highlights(&self, img: &mut Rgb32f) {
-        lightcraft_raw::highlight::reconstruct_with(img, self.wb, HIGHLIGHT_CLIP, clipped_white(&self.matrix));
+        self.rebuild_highlights_masked(img, None);
+    }
+
+    /// [`Self::rebuild_highlights`]; with `mask`, a binned image's clip mask
+    /// ([`lightcraft_raw::RawImage::develop_binned_masked`]) tells the clipped channels.
+    pub fn rebuild_highlights_masked(&self, img: &mut Rgb32f, mask: Option<&[u8]>) {
+        let white = clipped_white(&self.matrix);
+        match mask {
+            Some(mask) => lightcraft_raw::highlight::reconstruct_masked(img, self.wb, HIGHLIGHT_CLIP, white, mask),
+            None => lightcraft_raw::highlight::reconstruct_with(img, self.wb, HIGHLIGHT_CLIP, white),
+        };
     }
 
     /// White balance, matrix, tables and baseline exposure, in place.
@@ -319,8 +330,9 @@ pub fn load_vec_pair(bytes: Vec<u8>, max_edge: usize, spec: &DenoiseSpec) -> Res
 }
 
 /// The denoised camera RGB of `raw` from its cached product, as the plain development would have it: the default
-/// crop, and `factor` × `factor` blocks averaged into one pixel when the plain one was binned. `None` when the product
-/// is missing, damaged, made from something else or not the size of this raw's active area.
+/// crop, and `factor` × `factor` blocks averaged into one pixel when the plain one was binned (plain means: the plain
+/// development's clip mask tells highlight reconstruction which of them held clipped samples). `None` when the
+/// product is missing, damaged, made from something else or not the size of this raw's active area.
 fn denoised_camera_rgb(raw: &lightcraft_raw::RawImage, spec: &DenoiseSpec, factor: usize) -> Option<Rgb32f> {
     use lightcraft_denoise::product::{self, Window};
     let a = raw.active_area;
@@ -331,7 +343,7 @@ fn denoised_camera_rgb(raw: &lightcraft_raw::RawImage, spec: &DenoiseSpec, facto
     if raw.opcodes.list3.is_empty() {
         let c = raw.develop_crop(a.width, a.height);
         let window = Window { x: c.x, y: c.y, width: c.width, height: c.height };
-        product::read_window(&spec.product, &spec.key, Some(window), factor, Some(HIGHLIGHT_CLIP)).ok()
+        product::read_window(&spec.product, &spec.key, Some(window), factor, None).ok()
     } else {
         // (the plain development is not binned either when the file has opcodes of this kind: `factor` is 1)
         let whole = product::read(&spec.product, &spec.key, 1).ok()?;
@@ -368,16 +380,17 @@ fn load_bytes_now(
         // larger levels (exports, 1:1) demosaic the whole sensor.
         let t0 = web_time::Instant::now();
         let bin = bin_factor(&raw, max_edge);
+        // (binned: block means, and which colours had a clipped sample in each block)
         let binned = match bin {
-            Some(k) => raw.develop_binned(k, HIGHLIGHT_CLIP).map_err(|e| e.to_string())?,
+            Some(k) => raw.develop_binned_masked(k, HIGHLIGHT_CLIP).map_err(|e| e.to_string())?,
             None => None,
         };
         let factor = if binned.is_some() { bin.unwrap_or(1) } else { 1 };
-        let img = match binned {
-            Some(img) => img,
+        let (img, clip_mask) = match binned {
+            Some((img, mask)) => (img, Some(mask)),
             None => {
                 let method = if max_edge <= 600 { lightcraft_raw::Method::Bilinear } else { lightcraft_raw::Method::Ahd };
-                raw.develop(method).map_err(|e| e.to_string())?
+                (raw.develop(method).map_err(|e| e.to_string())?, None)
             }
         };
         // the same development from the denoised mosaic, when the photo has been denoised
@@ -399,7 +412,7 @@ fn load_bytes_now(
         let finish = |mut img: Rgb32f| {
             let mut stages = vec![("develop", t0.elapsed())];
             stages.push(("transform", t0.elapsed()));
-            colour.rebuild_highlights(&mut img);
+            colour.rebuild_highlights_masked(&mut img, clip_mask.as_deref());
             stages.push(("highlights", t0.elapsed()));
             colour.apply(&mut img);
             stages.push(("colour", t0.elapsed()));
@@ -706,6 +719,37 @@ mod tests {
             }
         }
         assert!(probe_bytes("x.jpg", b"not an image").is_err());
+    }
+
+    /// Issue #548: a small preview bins the mosaic by 8; specular points that clip a single green sample
+    /// of a block on a grey surface must not become green speckles (the block's green used to take the
+    /// clip level, which highlight reconstruction then kept).
+    #[test]
+    fn coarse_binning_keeps_specular_points_neutral() {
+        let (w, h) = (256usize, 192usize);
+        // grey after the file's white balance (as-shot neutral 0.5 : 1 : 0.7), brighter to the right
+        let neutral = [0.5f32, 1.0, 0.7];
+        let cfa = lightcraft_raw::Cfa::bayer("RGGB").unwrap();
+        let mut data: Vec<u16> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let v = (0.3 + 0.2 * x as f32 / w as f32) * neutral[cfa.color_at(x, y).min(2) as usize];
+                (256.0 + v * (16000.0 - 256.0)).round() as u16
+            })
+            .collect();
+        // one clipped green sample (RGGB: even row, odd column) in every other 8 × 8 block
+        for by in 0..h / 8 {
+            for bx in (by % 2..w / 8).step_by(2) {
+                data[(by * 8 + 4) * w + bx * 8 + 5] = 16000;
+            }
+        }
+        let bytes = crate::tests_xmp::synthetic_dng_of(w, h, "RGGB", data, None, Default::default());
+        let raw = lightcraft_raw::decode(&bytes).unwrap();
+        assert_eq!(bin_factor(&raw, 32), Some(8));
+        let (img, _) = load_bytes(&bytes, 32).unwrap();
+        assert_eq!((img.width, img.height), (32, 24));
+        let worst = img.data.iter().map(|p| p[1] / ((p[0] + p[2]) / 2.0).max(1e-6)).fold(0.0f32, f32::max);
+        assert!(worst < 1.12, "green speckles: green {worst:.2}× the other channels");
     }
 
     #[test]
