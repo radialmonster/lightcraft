@@ -577,7 +577,22 @@ fn collect_pairs(sensor: &Rgb32f, reference: &Rgb32f, min_chroma: f32, edge_limi
         colour += usize::from(max - min > min_chroma);
         pairs.push((input.map(f64::from), output.map(f64::from)));
     }
+    log_gate("pairs", pairs.len() as f64, 256.0, true);
+    log_gate("colourful pairs", colour as f64, (pairs.len() / 20) as f64, true);
     (pairs.len() >= 256 && colour >= pairs.len() / 20).then_some((pairs, bright))
+}
+
+/// Under `LIGHTCRAFT_PROFILE`: one line per acceptance gate with the measured value, the threshold and the signed
+/// margin (positive passes, negative fails). `at_least` is true for a gate that needs `value >= threshold`, false
+/// for one that needs `value < threshold` (the margin is then `threshold - value`). Diagnostics only: nothing
+/// reads the result, and the gates themselves are tested where they were.
+fn log_gate(name: &str, value: f64, threshold: f64, at_least: bool) {
+    if !lightcraft_pipeline::profiling() {
+        return;
+    }
+    let margin = if at_least { value - threshold } else { threshold - value };
+    let verdict = if margin >= 0.0 { "pass" } else { "fail" };
+    eprintln!("[profile] gate {name}: value {value:.5} threshold {threshold:.5} margin {margin:+.5} {verdict}");
 }
 
 /// Ridge-regularised 3×3 chromaticity matrix (luminance-normalised RGB) on the training pairs.
@@ -603,6 +618,7 @@ fn fit_matrix(pairs: &[([f64; 3], [f64; 3])]) -> Option<Mat3> {
     let trace: f64 = (0..3).map(|i| gram[i][i]).sum();
     let inverse = Mat3(gram).inverse()?;
     let condition = trace * (0..3).map(|i| inverse.0[i][i].abs()).sum::<f64>();
+    log_gate("matrix condition (log10)", condition.log10(), 6.0, false);
     if trace <= 0.0 || !condition.is_finite() || condition > 1e6 {
         return None;
     }
@@ -745,6 +761,10 @@ fn fit_pairs_on(
             if tone_fit == ToneFit::ConditionalMedian { ", conditional-median tone" } else { "" }
         );
     }
+    if samples > 0 {
+        log_gate("look improvement (after/before)", after / before, MIN_IMPROVEMENT, false);
+        log_gate("look holdout RMS", (after / samples as f64).sqrt(), MAX_HOLDOUT_RMS, false);
+    }
     if samples == 0 || after >= before * MIN_IMPROVEMENT || after / samples as f64 > MAX_HOLDOUT_RMS.powi(2) {
         return None;
     }
@@ -835,6 +855,7 @@ fn fit_partial_on(sensor: &Rgb32f, reference: &Rgb32f, edge_limit: Option<f32>) 
     // as for a known colour model: enough signal for the tone, but no monochrome reference
     let (pairs, bright) = collect_pairs(sensor, reference, 0.005, edge_limit)?;
     let related = rank_correlation(&pairs);
+    log_gate("partial rank correlation", related, PARTIAL_MIN_RANK_CORRELATION, true);
     if related < PARTIAL_MIN_RANK_CORRELATION {
         if lightcraft_pipeline::profiling() {
             eprintln!("[profile] camera look partial: luminance rank correlation {related:.3}, not the same picture");
@@ -877,6 +898,10 @@ fn fit_partial_on(sensor: &Rgb32f, reference: &Rgb32f, edge_limit: Option<f32>) 
             (after / samples.max(1) as f64).sqrt(),
             if edge_limit.is_some() { ", away from edges" } else { "" }
         );
+    }
+    if samples > 0 {
+        log_gate("partial improvement linear (after/before)", after / before, MIN_IMPROVEMENT, false);
+        log_gate("partial improvement encoded (after/before)", after_encoded / before_encoded, MIN_IMPROVEMENT, false);
     }
     let better =
         after.is_finite() && after_encoded.is_finite() && after < before * MIN_IMPROVEMENT && after_encoded < before_encoded * MIN_IMPROVEMENT;
@@ -945,6 +970,7 @@ fn fit_tone_only_on(sensor: &Rgb32f, reference: &Rgb32f, colour: &Option<(Mat3, 
     // every pair counts: the JPEG has no colour to require
     let (pairs, _) = collect_pairs(sensor, reference, f32::NEG_INFINITY, edge_limit)?;
     let related = rank_correlation_ties(&pairs);
+    log_gate("tone-only rank correlation", related, PARTIAL_MIN_RANK_CORRELATION, true);
     if related < PARTIAL_MIN_RANK_CORRELATION {
         if lightcraft_pipeline::profiling() {
             eprintln!("[profile] camera look from a black-and-white JPEG: luminance rank correlation {related:.3}, not the same picture");
@@ -978,6 +1004,10 @@ fn fit_tone_only_on(sensor: &Rgb32f, reference: &Rgb32f, colour: &Option<(Mat3, 
             (after / samples.max(1) as f64).sqrt(),
             if edge_limit.is_some() { ", away from edges" } else { "" }
         );
+    }
+    if samples > 0 {
+        log_gate("tone-only improvement linear (after/before)", after / before, MIN_IMPROVEMENT, false);
+        log_gate("tone-only improvement encoded (after/before)", after_encoded / before_encoded, MIN_IMPROVEMENT, false);
     }
     let better =
         after.is_finite() && after_encoded.is_finite() && after < before * MIN_IMPROVEMENT && after_encoded < before_encoded * MIN_IMPROVEMENT;
