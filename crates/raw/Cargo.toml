@@ -27,8 +27,14 @@ default = ["jxl"]
 ## JPEG XL compressed DNGs (DNG 1.7, compression 52546) via jxl-oxide (pure Rust, MIT OR Apache-2.0).
 jxl = ["dep:jxl-oxide"]
 
+# rawinfo's argument, output-naming and JSON tests run with `cargo test`
+[[example]]
+name = "rawinfo"
+test = true
+
 [dev-dependencies]
 jpeg-encoder = { workspace = true }
+serde_json = { workspace = true }
 proptest = { workspace = true }
 zune-jpegxl = { workspace = true }
 # Pinned CC0 corpus identities; not a product dependency.
