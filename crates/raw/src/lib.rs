@@ -48,6 +48,10 @@ pub mod spectral;
 mod tiffraw;
 mod unpack;
 mod vendor;
+/// Canon CRW (CIFF) container parse; the sensor payload is not decoded (see the module docs).
+pub mod crw {
+    pub use crate::vendor::crw::{Ciff, Entry, VISIT_BUDGET, parse};
+}
 mod wb_estimate;
 
 pub use demosaic::{Method, demosaic};
