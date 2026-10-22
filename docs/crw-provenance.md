@@ -9,3 +9,12 @@ Inputs: the 11 CC0 pixls CRW files (10D 2027/3164/3165, 300D 1983/3162, D30 1307
 5. 64-sample block structure (3152/64 = 49.25 units per row), repeated zero-block units, two table families (A: 10D 2027, 300D 1983, D60 2010, Rebel 1308; B: 10D 3164/3165, 300D 3162; D30/G1/G5/G6 each distinct). Informed by: those files.
 6. Table inference from A/B paired starts was under-determined (thousands of consistent splits); no table derived. Entropy payload NOT decoded.
 7. CodeRabbit items: visit budget (VISIT_BUDGET) + self-referencing dir test; fuzz test fails on missing/unreadable paths and on empty list; empty/truncated inputs do not panic.
+
+## Session 2 (Lane A/B, no tables obtained)
+
+8. Tag 0x1835 (decoder table id) is constant within a camera family (values 0/1/2), so only three table sets exist; files can be pooled per id. Informed by: all 11 CC0 files.
+9. Bit-level analysis of the first blocks (run-length of 1s/0s, repeated zero-block tokens, ZRL-like 16-position tokens) supports a JPEG-like (run,size) layout, but the DC/EOB token identity and the G5/G6 framing stayed unresolved. D30 and G1 streams share an identical 17-bit prefix, then diverge. Informed by: CC0 files only.
+10. Lane B: searches for an original public-domain source of the tables (patent text or standard) found nothing clearly original and clean; nothing accepted, nothing used.
+11. No ncsa file was used as a derivation input. No decoder code, docs or output from any other project was opened.
+
+Result: tables NOT derived; raw payload NOT decoded; container parse only. Scratch scripts (ciff.py, p1..p8.py) are in the session scratchpad crw/ folder.
