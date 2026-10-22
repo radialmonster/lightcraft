@@ -18,3 +18,8 @@ Inputs: the 11 CC0 pixls CRW files (10D 2027/3164/3165, 300D 1983/3162, D30 1307
 11. No ncsa file was used as a derivation input. No decoder code, docs or output from any other project was opened.
 
 Result: tables NOT derived; raw payload NOT decoded; container parse only. Scratch scripts (ciff.py, p1..p8.py) are in the session scratchpad crw/ folder.
+
+## Session 3 (Lane A scored-decode attempt, no tables obtained)
+12. Built Rust DFS table-inference tools (scratch only) over CC0 streams (10D 2027/3165 etc.) using only the CC0 files and the JPEG-like (run,size) hypothesis. Rounds logged in scratchpad crw/rounds.log. Parse-level constraints (Kraft, canonical order, block length 64, flat-border units) leave millions of consistent table sets; no candidate reached a scored decode. No decoder written, no ncsa files used, no external decoder consulted.
+13. Observation: D30 raw blob does not start with a zero 2-bit plane, so the 10D/300D framing does not apply to D30.
+Result: still no tables; CRW decode not implemented.
