@@ -286,7 +286,7 @@ fn samples(p: &Plan, w: usize, h: usize) -> Result<Vec<u16>> {
     let mut br = Bits { d: &s, pos: 0, total: s.len() * 8 };
     let mut e = vec![0i32; n];
     let mut acc = 0i32;
-    for blk in e.chunks_exact_mut(64) {
+    for blk in e.as_chunks_mut::<64>().0 {
         let cat = br.sym(&p.dc)?;
         if cat > 15 {
             return Err(RawError::Corrupt("CRW DC category".into()));
@@ -349,7 +349,7 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
         return Err(RawError::Corrupt("CRW sensor info".into()));
     };
     let n = crate::checked_pixel_count(w as u64, h as u64).ok_or(RawError::Limit("image too large"))? as usize;
-    if n % 64 != 0 || w % 2 != 0 || r < l || bt < t || r >= w || bt >= h {
+    if !n.is_multiple_of(64) || !w.is_multiple_of(2) || r < l || bt < t || r >= w || bt >= h {
         return Err(RawError::Corrupt("CRW geometry".into()));
     }
     let active = Rect::new(l, t, r - l + 1, bt - t + 1);
