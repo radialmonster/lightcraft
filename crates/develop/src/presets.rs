@@ -175,6 +175,10 @@ pub fn deep_merge(base: &mut Value, patch: &Value) {
 ///   `enabled` switch of an object, that object's `amount` blends from 0 rather than from the
 ///   photo's value: the photo's amount was the strength of its own choice. So a preset's profile
 ///   or LUT fades in from 0 % to the preset's amount (a profile at 0 % is no look at all).
+/// - **Numbers on another scale.** White balance `temp` / `tint` on a different [`crate::WbScale`]
+///   than the photo's (Kelvin against the older relative scale) are in other units and can't be
+///   blended: they are taken whole at any amount above 0, with the scale. (A partial with `temp` or
+///   `tint` and no `scale` is on the relative scale, as [`DevelopSettings::merged`] reads it.)
 fn scale_patch(base: &Value, patch: &Value, t: f64) -> Value {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
@@ -182,6 +186,8 @@ fn scale_patch(base: &Value, patch: &Value, t: f64) -> Value {
                 let changed = b.get(k).is_none_or(|bv| bv != pv);
                 changed && (pv.is_string() || (k == "enabled" && pv.is_boolean()))
             });
+            let other_scale = (p.contains_key("temp") || p.contains_key("tint"))
+                && p.get("scale").and_then(Value::as_str).unwrap_or("legacy") != b.get("scale").and_then(Value::as_str).unwrap_or("legacy");
             let zero = Value::from(0.0);
             let mut out = Map::new();
             for (k, pv) in p {
@@ -191,7 +197,8 @@ fn scale_patch(base: &Value, patch: &Value, t: f64) -> Value {
                     None if choice_changed && k == "amount" && pv.is_number() => &zero,
                     None => &Value::Null,
                 };
-                out.insert(k.clone(), scale_patch(bv, pv, t));
+                let v = if other_scale && t > 0.0 && (k == "temp" || k == "tint") { pv.clone() } else { scale_patch(bv, pv, t) };
+                out.insert(k.clone(), v);
             }
             Value::Object(out)
         }
@@ -454,6 +461,26 @@ mod tests {
         let out = apply_partial(&DevelopSettings::default(), &partial, 0.5);
         assert!(out.hdr.enabled);
         assert!((out.hdr.sdr_contrast - 20.0).abs() < 1e-9, "{}", out.hdr.sdr_contrast);
+    }
+
+    /// White balance on another scale (Kelvin against the older relative one) is in other units:
+    /// taken whole with its scale, never a blend of the two.
+    #[test]
+    fn amount_takes_white_balance_on_another_scale_whole() {
+        let kelvin = json!({"wb": {"mode": "custom", "temp": 4200.0, "tint": 8.0, "scale": "kelvin"}});
+        let photo = DevelopSettings::default(); // relative scale, 6500 / 0 = as shot
+        for t in [0.01, 0.3, 0.7] {
+            let out = apply_partial(&photo, &kelvin, t);
+            assert_eq!((out.wb.scale, out.wb.temp, out.wb.tint), (crate::WbScale::Kelvin, 4200.0, 8.0), "{t}");
+        }
+        let wb = crate::WhiteBalance { mode: crate::WbMode::Custom, temp: 5000.0, tint: 0.0, scale: crate::WbScale::Kelvin };
+        let photo = DevelopSettings { wb, ..DevelopSettings::default() };
+        // a partial without a scale is on the relative scale
+        let out = apply_partial(&photo, &json!({"wb": {"temp": 7000.0, "tint": 10.0}}), 0.3);
+        assert_eq!((out.wb.scale, out.wb.temp, out.wb.tint), (crate::WbScale::Legacy, 7000.0, 10.0));
+        // the same scale blends
+        let out = apply_partial(&photo, &kelvin, 0.5);
+        assert_eq!((out.wb.scale, out.wb.temp, out.wb.tint), (crate::WbScale::Kelvin, 4600.0, 4.0));
     }
 
     /// Every leaf of `v` that is not a number (and every list's length), by path.
