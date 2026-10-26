@@ -92,7 +92,7 @@ pub const GPU_FAILED: &str =
 enum Placement {
     /// On the GPU when there is one (Metal on macOS); a job that fails there is retried on the CPU.
     Gpu,
-    /// On the CPU: this build has no GPU path, the environment switches the GPU off, or the model
+    /// On the CPU: this build has no GPU path, the environment or the GPU setting switches it off, or the model
     /// failed on it.
     Cpu,
 }
@@ -102,7 +102,8 @@ impl Placement {
         if !lightcraft_segment::GPU_BUILD {
             return Placement::Cpu;
         }
-        if let Some(why) = lightcraft_gpu::env_off_reason() {
+        // the environment switches and the Disable GPU setting: no adapter for SAM 3 either (#315, #410)
+        if let Some(why) = lightcraft_gpu::switched_off() {
             log::info!("SAM 3 runs on the CPU ({why})");
             return Placement::Cpu;
         }

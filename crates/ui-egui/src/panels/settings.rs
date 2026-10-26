@@ -588,7 +588,18 @@ fn import_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
 fn performance_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     use lightcraft_engine::gpu;
     heading(ui, t, crate::i18n::tr("Rendering"));
-    check(ui, "settings.gpu", &mut app.ui.settings.gpu, "Use the GPU for rendering");
+    row(ui, t, crate::i18n::tr("Use the GPU for rendering"), |ui| {
+        let mut policy = app.ui.settings.gpu_policy();
+        let opts = [(gpu::GpuPolicy::Auto, "Automatic"), (gpu::GpuPolicy::Force, "Always"), (gpu::GpuPolicy::Disable, "Never")];
+        if choices(ui, "settingsGpu", &opts, &mut policy) {
+            app.ui.settings.set_gpu_policy(policy);
+        }
+    });
+    hint(
+        ui,
+        t,
+        "Automatic: the GPU when it can, else the CPU. Always: never the CPU; a photo the GPU can't render is an error. Never: the CPU only, takes full effect after a restart.",
+    );
     let status = if !gpu::available() {
         match gpu::unavailable_reason() {
             Some(why) => crate::i18n::tr_format!("Rendering on the CPU: {why}", why = why),

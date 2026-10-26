@@ -1017,7 +1017,28 @@ impl RenderJob {
                 // Thumbnails (many small jobs side by side) stay on the CPU; views and exports use
                 // the GPU when there is one.
                 let gpu = self.cache.is_none();
-                let (mut rendered, gpu_fallback) = develop_reporting(src, &info, &self.settings, &self.request, self.stages.as_deref(), gpu);
+                // Force GPU (`lightcraft_gpu::GpuPolicy::Force`): such a job never renders on the CPU
+                let (mut rendered, gpu_fallback) = if gpu && lightcraft_gpu::forced() {
+                    match develop_forced(src, &info, &self.settings, &self.request, self.stages.as_deref()) {
+                        Ok(r) => (r, None),
+                        Err(e) => {
+                            return RenderResult {
+                                request_id: self.request_id,
+                                source_key: self.source_key,
+                                photo: self.photo,
+                                level: self.level,
+                                key: self.key,
+                                rendered: Err(e),
+                                gpu_fallback: None,
+                                loaded: (!was_loaded).then_some(source),
+                                quick: None,
+                                display: None,
+                            };
+                        }
+                    }
+                } else {
+                    develop_reporting(src, &info, &self.settings, &self.request, self.stages.as_deref(), gpu)
+                };
                 // for a display profile: the image goes to the display's values, the histogram
                 // and the cached view preview stay sRGB
                 let mut srgb = None;
@@ -1094,6 +1115,50 @@ pub fn develop_reporting(
         rendered.histogram = h;
     }
     (rendered, fallback)
+}
+
+/// Why a render can't run on the GPU at all, whatever the device: the stages with no GPU kernel
+/// (LUT profiles, refined masks, soft proofs, 16-bit or float output, the HDR range overlay).
+/// `None`: it can, when there is a usable device. Under Auto these render on the CPU.
+pub fn cpu_only_reason(s: &DevelopSettings, req: &RenderRequest) -> Option<&'static str> {
+    let s = s.effective();
+    if lightcraft_pipeline::lut::is_lut_profile(&s.profile.id) {
+        return Some("the profile is a LUT profile (no GPU stage)");
+    }
+    if s.masks.iter().any(|m| m.visible && m.refine > 0.0) {
+        return Some("a mask is refined (no GPU stage)");
+    }
+    if req.proof.is_some() {
+        return Some("soft proofing renders on the CPU");
+    }
+    if req.depth != lightcraft_pipeline::OutputDepth::U8 {
+        return Some("16-bit and float output render on the CPU");
+    }
+    if req.overlay == lightcraft_pipeline::Overlay::HdrRange {
+        return Some("the HDR range overlay renders on the CPU");
+    }
+    None
+}
+
+/// [`develop_reporting`] under Force GPU: the GPU's image, or an error that says why there is none
+/// (never a CPU render).
+fn develop_forced(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &RenderRequest, stages: Option<&StageCache>) -> Result<Rendered, String> {
+    if let Some(why) = cpu_only_reason(s, req) {
+        return Err(format!("Force GPU is on, but this render can't run on the GPU: {why}. Set the GPU to Automatic to render it on the CPU."));
+    }
+    match lightcraft_gpu::try_render(src, info, s, req, stages) {
+        Ok(mut r) => {
+            if let Some(h) = lightcraft_pipeline::hdr_histogram(src, info, s, req) {
+                r.histogram = h;
+            }
+            Ok(r)
+        }
+        Err(lightcraft_gpu::Fallback::Failed(why)) => Err(format!("Force GPU is on, and the GPU render failed: {why}")),
+        Err(lightcraft_gpu::Fallback::NotTried) => Err(format!(
+            "Force GPU is on, but there is no usable GPU: {}",
+            lightcraft_gpu::unavailable_reason().unwrap_or_else(|| "no device".into())
+        )),
+    }
 }
 
 fn develop_image(

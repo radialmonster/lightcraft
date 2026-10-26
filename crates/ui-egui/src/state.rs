@@ -464,8 +464,12 @@ pub struct AppSettings {
     pub close_dialogs_outside: bool,
     /// Photos and folders dropped on the window import at once, without the import review.
     pub import_dropped_directly: bool,
-    /// GPU rendering allowed (`app.gpu`).
+    /// GPU rendering allowed (`app.gpu`): `false` is Disable GPU. Kept as the on/off key that
+    /// earlier versions read and write; see [`AppSettings::gpu_policy`].
     pub gpu: bool,
+    /// With `gpu` on: Force GPU (a render that can't run on the GPU is an error, never a CPU
+    /// render) instead of Automatic. `lightcraft-cli` reads both keys from `ui.json` too.
+    pub gpu_force: bool,
     /// Largest long edge (pixels) the user lets the loupe render at; 0 = Automatic (the size it is
     /// drawn at, up to the photo's own pixels and [`LOUPE_EDGE_CEILING`]). Not the old
     /// `previewEdge` key: its 2560 px default was the soft-image bug (issue #323).
@@ -537,6 +541,24 @@ pub enum LightroomImport {
     AlwaysMerge,
 }
 
+impl AppSettings {
+    /// The GPU setting: Automatic, Force GPU or Disable GPU (from `gpu` and `gpu_force`).
+    pub fn gpu_policy(&self) -> lightcraft_engine::gpu::GpuPolicy {
+        use lightcraft_engine::gpu::GpuPolicy;
+        match (self.gpu, self.gpu_force) {
+            (false, _) => GpuPolicy::Disable,
+            (true, false) => GpuPolicy::Auto,
+            (true, true) => GpuPolicy::Force,
+        }
+    }
+
+    pub fn set_gpu_policy(&mut self, p: lightcraft_engine::gpu::GpuPolicy) {
+        use lightcraft_engine::gpu::GpuPolicy;
+        self.gpu = p != GpuPolicy::Disable;
+        self.gpu_force = p == GpuPolicy::Force;
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
@@ -550,6 +572,7 @@ impl Default for AppSettings {
             close_dialogs_outside: false,
             import_dropped_directly: false,
             gpu: true,
+            gpu_force: false,
             preview_limit: 0,
             external_editor: String::new(),
             external_file: EditFile::default(),

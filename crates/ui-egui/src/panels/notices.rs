@@ -14,10 +14,18 @@ pub fn logic(app: &mut LightcraftApp) {
     let new = app.session.take_library_warnings();
     app.notices.extend(new);
     use lightcraft_engine::gpu;
-    if app.gpu_notice && app.gpu_applied == Some(true) && gpu::ready() {
+    if app.gpu_notice && app.gpu_applied.is_some_and(|p| p != gpu::GpuPolicy::Disable) && gpu::ready() {
         app.gpu_notice = false;
         if !gpu::available() {
-            app.notices.extend(gpu_notice(gpu::unavailable_reason().as_deref(), app.ui.settings.gpu));
+            let reason = gpu::unavailable_reason();
+            if app.gpu_applied == Some(gpu::GpuPolicy::Force) {
+                app.notices.push(crate::i18n::tr_format!(
+                    "Settings ▸ Performance says Always use the GPU, but no GPU can be used ({why}), so photos won't render. Choose Automatic to render on the CPU.",
+                    why = reason.as_deref().unwrap_or("no device")
+                ));
+            } else {
+                app.notices.extend(gpu_notice(reason.as_deref(), app.ui.settings.gpu));
+            }
         }
     }
 }
@@ -677,7 +685,7 @@ mod tests {
         for reason in [
             "disabled by LIGHTCRAFT_GPU=0",
             "disabled by LIGHTCRAFT_GPU_BACKEND=off",
-            "disabled by the GPU rendering preference (app.gpu)",
+            "disabled by the GPU setting (Disable GPU)",
             "software adapter (llvmpipe (LLVM 19.1.7, 256 bits)) skipped: the CPU pipeline is faster",
             "stopped after a GPU failure: device lost",
         ] {

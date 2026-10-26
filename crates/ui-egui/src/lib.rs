@@ -569,7 +569,11 @@ pub struct LightcraftApp {
     /// The window is in full screen (as last reported by the host, or as last requested).
     pub window_is_fullscreen: bool,
     /// The GPU preference last applied (`app.gpu`), to apply Settings changes once.
-    gpu_applied: Option<bool>,
+    gpu_applied: Option<lightcraft_engine::gpu::GpuPolicy>,
+    /// The device policy this run uses instead of the saved setting (`--gpu`, `LIGHTCRAFT_GPU`, or
+    /// Force GPU that couldn't be honoured), and the saved setting it overrides: it holds until the
+    /// user changes the setting, and is never saved.
+    pub gpu_override: Option<(lightcraft_engine::gpu::GpuPolicy, lightcraft_engine::gpu::GpuPolicy)>,
     /// Say once, when the GPU device has been tried, that no graphics processor was found
     /// ([`panels::notices::gpu_notice`]). The desktop app sets it; headless sessions and tests don't.
     pub gpu_notice: bool,
@@ -694,6 +698,7 @@ impl LightcraftApp {
             hover_preview: None,
             window_is_fullscreen: false,
             gpu_applied: None,
+            gpu_override: None,
             gpu_notice: false,
             memory_applied: None,
             display_applied: None,
@@ -2229,12 +2234,21 @@ impl LightcraftApp {
 
     /// Apply settings that act outside the UI state: GPU rendering and window full screen.
     fn apply_settings(&mut self, ctx: &egui::Context) {
-        if self.gpu_applied != Some(self.ui.settings.gpu) {
-            self.gpu_applied = Some(self.ui.settings.gpu);
-            let _ = self.session.execute("app.gpu", &serde_json::json!({"enabled": self.ui.settings.gpu}));
+        let saved = self.ui.settings.gpu_policy();
+        let policy = match self.gpu_override {
+            Some((p, base)) if base == saved => p,
+            Some(_) => {
+                self.gpu_override = None;
+                saved
+            }
+            None => saved,
+        };
+        if self.gpu_applied != Some(policy) {
+            self.gpu_applied = Some(policy);
+            let _ = self.session.execute("app.gpu", &serde_json::json!({"policy": policy.name()}));
             // GPU device + kernels off the UI thread, once the window is up and only when GPU
             // rendering is on: a broken driver must not keep the window from appearing (issue #136)
-            if self.ui.settings.gpu {
+            if policy != lightcraft_engine::gpu::GpuPolicy::Disable {
                 lightcraft_engine::gpu::warm_up();
             }
         }

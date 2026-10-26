@@ -23,6 +23,9 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
+
+mod policy;
+pub use policy::{env_policy, forced, policy, resolve_policy, set_policy, GpuPolicy, Resolved};
 use std::sync::{Arc, Mutex};
 
 use lightcraft_develop::DevelopSettings;
@@ -47,7 +50,6 @@ mod render;
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::GpuStages;
 
-static ENABLED: AtomicBool = AtomicBool::new(true);
 /// Set when a GPU render failed: the process stays on the CPU from then on.
 static BROKEN: AtomicBool = AtomicBool::new(false);
 
@@ -78,8 +80,8 @@ pub fn unavailable_reason() -> Option<String> {
     if let Some(why) = env_off_reason() {
         return Some(why.into());
     }
-    if !ENABLED.load(Ordering::Relaxed) {
-        return Some("disabled by the GPU rendering preference (app.gpu)".into());
+    if policy() == GpuPolicy::Disable {
+        return Some(DISABLED_BY_SETTING.into());
     }
     if shutting_down() {
         return Some("LightCraft is closing".into());
@@ -190,16 +192,24 @@ pub fn reset_failures() {
     let _ = BROKEN_HERE.try_with(|b| *b.borrow_mut() = None);
 }
 
-/// Allow or forbid GPU rendering at runtime (a preference). `LIGHTCRAFT_GPU=0` forbids it for the
-/// whole process regardless.
+/// What [`unavailable_reason`] and [`switched_off`] say under [`GpuPolicy::Disable`].
+const DISABLED_BY_SETTING: &str = "disabled by the GPU setting (Disable GPU)";
+
+/// Allow or forbid GPU rendering at runtime (the legacy on/off preference): `false` is
+/// [`GpuPolicy::Disable`]; `true` is [`GpuPolicy::Auto`], or keeps [`GpuPolicy::Force`] when that is
+/// set. `LIGHTCRAFT_GPU=0` forbids it for the whole process regardless.
 pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+    match (on, policy()) {
+        (false, _) => set_policy(GpuPolicy::Disable),
+        (true, GpuPolicy::Force) => {}
+        (true, _) => set_policy(GpuPolicy::Auto),
+    }
 }
 
 /// Whether GPU rendering is allowed (environment, preference, no earlier failure — real, or
 /// simulated on this thread).
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed) && !BROKEN.load(Ordering::Relaxed) && !env_disabled() && broken_here().is_none()
+    policy() != GpuPolicy::Disable && !BROKEN.load(Ordering::Relaxed) && !env_disabled() && broken_here().is_none()
 }
 
 /// The process is about to end: no GPU work starts from now on, on any thread. [`render`] returns
@@ -237,14 +247,14 @@ pub fn wait_idle(timeout: std::time::Duration) -> bool {
     }
 }
 
-/// Why GPU compute that has a device of its own (denoise, faces) is switched off by the user's settings, or `None`: the
-/// environment switches and the rendering preference, but not a render-device failure (the devices are separate).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn switched_off() -> Option<String> {
+/// Why GPU compute that has a device of its own (denoise, faces, the SAM 3 model) is switched off by the user's
+/// settings, or `None`: the environment switches and [`GpuPolicy::Disable`], but not a render-device failure (the
+/// devices are separate). Checked before any adapter is enumerated.
+pub fn switched_off() -> Option<String> {
     if let Some(why) = env_off_reason() {
         return Some(why.into());
     }
-    (!ENABLED.load(Ordering::Relaxed)).then(|| "disabled by the GPU rendering preference (app.gpu)".into())
+    (policy() == GpuPolicy::Disable).then(|| DISABLED_BY_SETTING.into())
 }
 
 /// Why the environment switches the GPU off for the whole process (`LIGHTCRAFT_GPU=0` or
@@ -265,7 +275,8 @@ pub fn env_off_reason() -> Option<&'static str> {
 fn env_disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| {
-        let off = std::env::var("LIGHTCRAFT_GPU").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false" | "no"));
+        let off = std::env::var("LIGHTCRAFT_GPU")
+            .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "false" | "no" | "cpu" | "disable" | "disabled" | "none"));
         #[cfg(not(target_arch = "wasm32"))]
         let off = off || backend::env_off();
         off
@@ -278,7 +289,7 @@ static GPU: std::sync::OnceLock<Result<ctx::Gpu, String>> = std::sync::OnceLock:
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn device() -> Option<&'static ctx::Gpu> {
     // turned off (preference, environment): don't even load the driver (issue #136)
-    if env_disabled() || !ENABLED.load(Ordering::Relaxed) {
+    if env_disabled() || policy() == GpuPolicy::Disable {
         return existing_device();
     }
     if let Some(g) = GPU.get() {
@@ -311,7 +322,7 @@ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
 /// while GPU rendering is turned off.
 pub fn warm_up() {
     #[cfg(not(target_arch = "wasm32"))]
-    if !env_disabled() && ENABLED.load(Ordering::Relaxed) && GPU.get().is_none() {
+    if !env_disabled() && policy() != GpuPolicy::Disable && GPU.get().is_none() {
         let _ = std::thread::Builder::new().name("lc-gpu-init".into()).spawn(|| {
             let _ = device();
         });

@@ -40,6 +40,7 @@ pub mod output;
 pub mod profiles;
 pub mod redeye;
 pub mod spots;
+pub mod stage_hook;
 pub mod tone;
 pub mod transform;
 pub mod upright;
@@ -569,6 +570,9 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
         None => Arc::new(frame.sample(src_img, w, h)),
     };
     lap("sample", &mut t);
+    if req.depth == OutputDepth::U8 && stage_hook::wants("sampled") {
+        stage_hook::offer(stage_hook::Dump::new("sampled", w, h).rgb("rgb", &sampled));
+    }
 
     let lin = match cached.as_ref().and_then(|e| e.lin.clone()).filter(|(k, _)| *k == lin_key) {
         Some((_, img)) => img,
@@ -581,6 +585,9 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
         }
     };
     lap("wb/spots/nr", &mut t);
+    if req.depth == OutputDepth::U8 && stage_hook::wants("lin") {
+        stage_hook::offer(stage_hook::Dump::new("lin", w, h).rgb("rgb", &lin));
+    }
     let mut planes = match cached.map(|e| e.planes) {
         Some(p) if p.key == lin_key => p,
         // A draft while noise reduction changes (a slider drag): the wide, edge-aware planes of the
@@ -604,6 +611,11 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
         let histogram = Histogram::of_srgb8(&image);
         lap("finish (deep)", &mut t);
         return Rendered { image, histogram, deep: Some(deep) };
+    }
+    if stage_hook::wants("finish") {
+        let fp = finish::FinishParams::new(s, frame, info, prep.img.width, prep.img.height, prep.px_per_long, prep.air, req.space);
+        let keep = plan.keep.map(|k| [k.x, k.y, k.w, k.h]);
+        stage_hook::offer(stage_hook::finish_dump(&prep, &fp, req.display.is_some(), req.proof.is_some(), keep));
     }
     let image = finish::finish(&prep, s, frame, info, req.space, req.display.as_ref(), req.proof);
     lap("finish", &mut t);

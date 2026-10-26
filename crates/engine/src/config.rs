@@ -262,9 +262,65 @@ mod config_tests {
     }
 }
 
+/// The app's settings folder for the GPU setting and crash markers: `None` under `LIGHTCRAFT_NO_PREFS`
+/// (tests, scripts), like the app.
+fn prefs_dir() -> Option<PathBuf> {
+    if std::env::var_os("LIGHTCRAFT_NO_PREFS").is_some() {
+        return None;
+    }
+    config_dir()
+}
+
+/// The GPU setting the app saved (`<config>/ui.json` → `settings.gpu`, `settings.gpuForce`), so a host
+/// without the window (`lightcraft-cli`) picks the device as the app's export does. `None`: nothing saved,
+/// `LIGHTCRAFT_NO_PREFS`, or the file can't be read (the default, Automatic, applies).
+pub fn saved_gpu_policy() -> Option<lightcraft_gpu::GpuPolicy> {
+    let bytes = std::fs::read(prefs_dir()?.join("ui.json")).ok()?;
+    gpu_policy_from_ui_json(&bytes)
+}
+
+/// [`saved_gpu_policy`] from the bytes of a `ui.json`.
+pub fn gpu_policy_from_ui_json(bytes: &[u8]) -> Option<lightcraft_gpu::GpuPolicy> {
+    use lightcraft_gpu::GpuPolicy;
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let settings = v.get("settings")?;
+    let on = settings.get("gpu").and_then(serde_json::Value::as_bool);
+    let force = settings.get("gpuForce").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    match (on, force) {
+        (None, false) => None,
+        (Some(false), _) => Some(GpuPolicy::Disable),
+        (_, true) => Some(GpuPolicy::Force),
+        (Some(true), false) => Some(GpuPolicy::Auto),
+    }
+}
+
+/// What the app's GPU crash markers record, read without removing them (the app reports and clears
+/// them at its next start): `gpu-init.marker` (a start died creating the GPU device, issue #136) or
+/// `gpu-lost.marker` (the device was lost while rendering, issue #1337). The app renders on the CPU
+/// while one is there under Automatic, and so does `lightcraft-cli` ([`lightcraft_gpu::resolve_policy`]).
+pub fn gpu_crash_marker() -> Option<String> {
+    let dir = prefs_dir()?;
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|t| t.trim().to_string());
+    if let Some(what) = read("gpu-init.marker") {
+        return Some(format!("it stopped while starting the GPU: {what}"));
+    }
+    read("gpu-lost.marker").map(|what| format!("the GPU was lost: {what}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_saved_gpu_setting_reads_both_keys() {
+        use lightcraft_gpu::GpuPolicy::*;
+        let p = |s: &str| gpu_policy_from_ui_json(s.as_bytes());
+        assert_eq!(p(r#"{"settings":{"gpu":true}}"#), Some(Auto));
+        assert_eq!(p(r#"{"settings":{"gpu":false,"gpuForce":true}}"#), Some(Disable));
+        assert_eq!(p(r#"{"settings":{"gpu":true,"gpuForce":true}}"#), Some(Force));
+        assert_eq!(p(r#"{"settings":{}}"#), None);
+        assert_eq!(p("not json"), None);
+    }
 
     /// A non-empty `LIGHTCRAFT_SAM3_DIR` wins; unset or empty falls back to `<config>/models/sam3` (issue #619).
     #[test]

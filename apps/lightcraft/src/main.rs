@@ -1,6 +1,6 @@
 //! LightCraft desktop app.
 //!
-//! Usage: `lightcraft [--library DIR | --memory] [--no-demo] [--control <port>] [files or folders…]`
+//! Usage: `lightcraft [--library DIR | --memory] [--no-demo] [--control <port>] [--gpu auto|gpu|cpu] [files or folders…]`
 //!
 //! The library (catalog, presets, thumbnail cache) lives in `--library DIR`, else
 //! `$LIGHTCRAFT_LIBRARY`, else — with Settings ▸ General ▸ At launch set to *Ask me*, or Alt/Option
@@ -164,7 +164,7 @@ fn gpu_crash_check_at(marker: Option<std::path::PathBuf>, in_memory: bool) -> Op
 fn gpu_crash_notice(what: &str) -> String {
     format!(
         "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. \
-         To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with \
+         To try the GPU again, set Settings ▸ Performance ▸ Use the GPU for rendering to Automatic; to try another graphics backend, start LightCraft with \
          LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off (see docs/gpu-pipeline.md → Troubleshooting)."
     )
 }
@@ -203,7 +203,7 @@ fn gpu_lost_check_at(marker: Option<&std::path::Path>, in_memory: bool) -> Optio
     }
     Some(format!(
         "LightCraft stopped last time after the graphics driver reset the GPU ({}) while photos rendered on it, so GPU rendering \
-         is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; \
+         is now off and photos render on the CPU. To try the GPU again, set Settings ▸ Performance ▸ Use the GPU for rendering to Automatic; \
          an up-to-date graphics driver may help.",
         reason.trim()
     ))
@@ -816,6 +816,9 @@ OPTIONS:
   --memory         throwaway in-memory session (alias --demo); nothing is saved
   --control PORT   serve the JSON-lines control channel on 127.0.0.1:PORT (env LIGHTCRAFT_CONTROL_PORT;
                    see docs/control-protocol.md)
+  --gpu auto|gpu|cpu   the GPU for this run, over Settings > Performance > Use the GPU: auto (the GPU when it can,
+                   else the CPU), gpu (always: a photo the GPU can't render is an error), cpu (never; also --cpu).
+                   The same setting and flag as lightcraft-cli, so both export the same pixels
   --version, --help
 
 ENVIRONMENT:
@@ -900,6 +903,7 @@ fn main() -> eframe::Result {
     let mut seed_demo = true;
     let mut in_memory = false;
     let mut library_dir: Option<std::path::PathBuf> = None;
+    let mut gpu_flag: Option<lightcraft_engine::gpu::GpuPolicy> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -907,6 +911,19 @@ fn main() -> eframe::Result {
             "--library" => library_dir = args.next().map(std::path::PathBuf::from),
             "--no-demo" => seed_demo = false,
             "--memory" | "--demo" => in_memory = true,
+            "--cpu" => gpu_flag = Some(lightcraft_engine::gpu::GpuPolicy::Disable),
+            "--gpu" => {
+                let v = args.next().unwrap_or_default();
+                match lightcraft_engine::gpu::GpuPolicy::parse(&v) {
+                    Some(p) => gpu_flag = Some(p),
+                    None => {
+                        eprintln!("lightcraft: --gpu takes auto, gpu or cpu (got `{v}`)
+
+{HELP}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--version" => {
                 println!("lightcraft {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -956,11 +973,26 @@ fn main() -> eframe::Result {
         prefs.as_ref().map(|u| &u.settings),
         lightcraft_engine::library::default_dir(),
     );
-    // GPU compute: off if the preference says so, or if the last launch died creating the device
-    // (issue #136) — before anything can create it
+    // GPU compute: --gpu, LIGHTCRAFT_GPU, the saved setting, Automatic — off under Automatic if the last
+    // launch died creating the device (issue #136) or lost it; decided as lightcraft-cli decides it
+    // (`lightcraft_gpu::resolve_policy`), before anything can create a device
     let gpu_crash = gpu_crash_check(in_memory).or_else(|| gpu_lost_check_at(gpu_lost_marker_path().as_deref(), in_memory));
-    let gpu_on = prefs.as_ref().is_none_or(|u| u.settings.gpu) && gpu_crash.is_none();
-    lightcraft_engine::gpu::set_enabled(gpu_on);
+    let saved_gpu = prefs.as_ref().map(|u| u.settings.gpu_policy());
+    let (gpu_policy, gpu_refused) = match lightcraft_engine::gpu::resolve_policy(gpu_flag, saved_gpu, gpu_crash.as_ref().map(|_| "see the notice")) {
+        Ok(r) => {
+            log::info!("gpu: {} ({})", r.policy.name(), r.source);
+            if let Some(n) = &r.note {
+                log::warn!("gpu: {n}");
+            }
+            (r.policy, None)
+        }
+        // Force GPU that can't be honoured: the window still opens, on the CPU, and says why
+        Err(e) => {
+            log::warn!("gpu: {e}");
+            (lightcraft_engine::gpu::GpuPolicy::Disable, Some(format!("Always use the GPU can't be honoured this run: {e}")))
+        }
+    };
+    lightcraft_engine::gpu::set_policy(gpu_policy);
     // the window's renderer: probed (Windows) and with a fallback chain, so a driver that can't
     // build egui's pipeline never kills the start-up
     let win_files = std::sync::Arc::new(window_files(in_memory));
@@ -1046,8 +1078,15 @@ fn main() -> eframe::Result {
                 };
                 // after the snapshot above, so the writer saves the switched-off preference
                 if let Some(notice) = gpu_crash {
-                    app.ui.settings.gpu = false;
+                    app.ui.settings.set_gpu_policy(lightcraft_engine::gpu::GpuPolicy::Disable);
                     app.notices.push(notice);
+                }
+                if let Some(notice) = gpu_refused {
+                    app.notices.push(notice);
+                }
+                // --gpu, LIGHTCRAFT_GPU or a refused Force GPU hold for this run and are not saved
+                if gpu_policy != app.ui.settings.gpu_policy() {
+                    app.gpu_override = Some((gpu_policy, app.ui.settings.gpu_policy()));
                 }
                 if let Some(port) = control_port {
                     let rx = control_server::start(port, cc.egui_ctx.clone());
@@ -1125,7 +1164,7 @@ fn stopped_text(error: &str, lost: Option<&str>) -> String {
     match lost {
         Some(reason) => format!(
             "{error}. The graphics driver reset the GPU ({reason}). LightCraft renders on the CPU from its next start; \
-             Settings ▸ Performance ▸ Use the GPU for rendering turns the GPU back on"
+             setting Settings ▸ Performance ▸ Use the GPU for rendering to Automatic turns the GPU back on"
         ),
         None => error.to_string(),
     }

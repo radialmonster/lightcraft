@@ -230,11 +230,15 @@ pub fn specs() -> Vec<CommandSpec> {
                 "versions": ph.versions.iter().map(|v| json!({"name": v.name, "created": v.created})).collect::<Vec<_>>(),
             }))
         }),
-        cmd!(query "app.gpu", "GPU Rendering", [], None, "{enabled?: bool} — allow/forbid GPU rendering (CPU fallback; LIGHTCRAFT_GPU=0 forbids it for the process); returns {enabled, available, adapter, reason (why the GPU is off), lastFallback (latest render redone on the CPU, and why)}", always, |_, p| {
-            if let Some(on) = p.get("enabled").and_then(Value::as_bool) {
+        cmd!(query "app.gpu", "GPU Rendering", [], None, "{policy?: \"auto\"|\"gpu\"|\"cpu\", enabled?: bool} — the GPU setting: auto (the GPU when usable, else the CPU), gpu (Force GPU: a render that can't run on the GPU is an error), cpu (Disable GPU); enabled false = cpu, true = auto (keeps gpu). LIGHTCRAFT_GPU=0 forbids it for the process. Returns {policy, enabled, available, adapter, reason (why the GPU is off), lastFallback (latest render redone on the CPU, and why)}", always, |_, p| {
+            if let Some(v) = p.get("policy") {
+                let policy = v.as_str().and_then(lightcraft_gpu::GpuPolicy::parse).ok_or_else(|| bad("app.gpu", "policy must be \"auto\", \"gpu\" or \"cpu\""))?;
+                lightcraft_gpu::set_policy(policy);
+            } else if let Some(on) = p.get("enabled").and_then(Value::as_bool) {
                 lightcraft_gpu::set_enabled(on);
             }
             Ok(json!({
+                "policy": lightcraft_gpu::policy().name(),
                 "enabled": lightcraft_gpu::enabled(),
                 "available": lightcraft_gpu::available(),
                 "adapter": lightcraft_gpu::adapter_name(),

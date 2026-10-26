@@ -22,6 +22,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lightcraft_engine::Session;
+use lightcraft_engine::gpu::GpuPolicy;
 use lightcraft_mcp::{Backend, DEFAULT_ADDR, Headless, Remote, Server, expand_paths};
 use serde_json::{Value, json};
 
@@ -44,6 +45,7 @@ USAGE:
         --connect [ADDR]  drive the running app (`lightcraft --control 7980`; default 127.0.0.1:7980)
         --script FILE|-   also run JSON lines {\"command\": id, \"params\": {…}} (or {\"method\": …})
         --keep-going      continue after a failed command
+        --gpu auto|gpu|cpu, --cpu   the device, headless only (see GPU below)
   lightcraft-cli mcp [OPTIONS] [FILES/FOLDERS…]
       MCP server (JSON-RPC 2.0 over stdio). Headless by default: an in-process session with the
       given files imported. Options:
@@ -51,6 +53,7 @@ USAGE:
         --demo            headless: start with the procedurally generated demo library
         --library DIR     headless: open (or create) a persistent LightCraft library; edits are saved
         --compact         list only the helper tools (every command stays reachable via run_command)
+        --gpu auto|gpu|cpu, --cpu   the device, headless only (see GPU below)
   lightcraft-cli render <IN> -o <OUT> [OPTIONS]
       Develop one file and export it (.jpg, .png, .tif, .webp, .avif, .jxl, .psd or .dng by extension) with the
       same encoder as the app's Export dialog. Options:
@@ -66,8 +69,12 @@ USAGE:
                              --opt format=original (copy + XMP sidecar) --opt metadata=none
                              --opt addToPhotos=true --opt photosAlbum=NAME (macOS: then add
                              the file to Apple Photos, into that album)
+        --gpu auto|gpu|cpu, --cpu   the device (see GPU below)
+        --dump-stage NAME=DIR  also write the named pipeline stage of the export's render to DIR as
+                             raw little-endian f32 planes + NAME.json (stages: sampled, lin,
+                             finish; renders on the CPU). For test scripts (tools/ replays)
   lightcraft-cli snapshot [OPTIONS] [FILES/FOLDERS…]
-      Run the full app UI headlessly (no window, no GPU: CPU-rasterized egui) and write PNGs.
+      Run the full app UI headlessly (no window, no GPU: CPU-rasterized egui, CPU renders) and write PNGs.
       Options:
         --demo            the procedural demo library (default unless --library or FILES)
         --library DIR     open (or create) a LightCraft library
@@ -111,6 +118,14 @@ USAGE:
       <config>/camera-profiles, or $LIGHTCRAFT_CAMERA_PROFILES). Raws of a profiled model then
       take their colour from the profile and only their tone from their own JPEG.
   lightcraft-cli --version | --help
+
+GPU (render, run, mcp): picked exactly as the app's export picks it, so the same photo and settings
+export the same pixels from both: --gpu, else LIGHTCRAFT_GPU (0/off/cpu: never the GPU, whatever
+the flag; auto; gpu), else the app's saved Settings > Performance > Use the GPU (unless
+LIGHTCRAFT_NO_PREFS is set), else auto. auto: the GPU when it can render the photo, else the CPU;
+gpu: always the GPU, and an error (never a CPU render) when it can't; cpu (or --cpu): never the GPU,
+no adapter is even looked for. Under auto, a GPU crash recorded by the app turns the GPU off; under
+gpu it is an error.
 ";
 
 #[cfg(feature = "dhat-heap")]
@@ -301,8 +316,14 @@ fn mcp(args: &[String]) -> Result<(), String> {
     let mut library: Option<String> = None;
     let mut compact = false;
     let mut files = Vec::new();
+    let mut gpu: Option<GpuPolicy> = None;
     let mut i = 0;
     while i < args.len() {
+        if let Some(p) = gpu_option(args, &mut i)? {
+            gpu = Some(p);
+            i += 1;
+            continue;
+        }
         match args[i].as_str() {
             "--connect" => {
                 // Optional address argument. A bare port (all digits) is taken as a port on the
@@ -333,6 +354,9 @@ fn mcp(args: &[String]) -> Result<(), String> {
             if !files.is_empty() || demo || library.is_some() {
                 return Err("FILES, --demo and --library apply to headless mode only (import through the `import` tool instead)".into());
             }
+            if gpu.is_some() {
+                return Err("--gpu/--cpu apply to headless mode only: the app renders with its own GPU setting".into());
+            }
             match Remote::connect(&addr) {
                 Ok(r) => {
                     eprintln!("lightcraft-cli mcp: connected to LightCraft at {addr}");
@@ -345,6 +369,7 @@ fn mcp(args: &[String]) -> Result<(), String> {
             }
         }
         None => {
+            apply_gpu(gpu, "mcp")?;
             let mut h = match &library {
                 Some(dir) => {
                     let mut h = Headless::default();
@@ -524,8 +549,14 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut imports = Vec::new();
     let mut script: Option<String> = None;
     let mut keep_going = false;
+    let mut gpu: Option<GpuPolicy> = None;
     let mut i = 0;
     while i < args.len() && args[i].starts_with("--") {
+        if let Some(p) = gpu_option(args, &mut i)? {
+            gpu = Some(p);
+            i += 1;
+            continue;
+        }
         match args[i].as_str() {
             "--" => {
                 i += 1;
@@ -575,14 +606,15 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut backend: Box<dyn Backend> =
         match connect {
             Some(addr) => {
-                if demo || library.is_some() || !imports.is_empty() {
-                    return Err("--demo, --library and --import apply to headless mode only".into());
+                if demo || library.is_some() || !imports.is_empty() || gpu.is_some() {
+                    return Err("--demo, --library, --import and --gpu/--cpu apply to headless mode only (the app renders with its own GPU setting)".into());
                 }
                 Box::new(Remote::connect(&addr).map_err(|e| {
                     format!("LightCraft is not reachable at {addr} ({e}); start it with `lightcraft --control {}`", connect_port(&addr))
                 })?)
             }
             None => {
+                apply_gpu(gpu, "run")?;
                 let mut h = match &library {
                     Some(dir) => {
                         let mut h = Headless::default();
@@ -631,6 +663,37 @@ fn take_value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a s
     args.get(*i).map(String::as_str).ok_or_else(|| format!("{flag} needs a value"))
 }
 
+/// `--gpu auto|gpu|cpu`, `--gpu=...` or `--cpu` at `args[*i]`: the policy it names (moving `i` past a
+/// value), `None` when `args[*i]` is another option.
+fn gpu_option(args: &[String], i: &mut usize) -> Result<Option<GpuPolicy>, String> {
+    let parse = |v: &str| GpuPolicy::parse(v).ok_or_else(|| format!("--gpu takes auto, gpu or cpu (got `{v}`)"));
+    match args[*i].as_str() {
+        "--cpu" => Ok(Some(GpuPolicy::Disable)),
+        "--gpu" => parse(take_value(args, i, "--gpu")?).map(Some),
+        a if a.starts_with("--gpu=") => parse(&a["--gpu=".len()..]).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// Decide the device for this process the way the app does ([`lightcraft_engine::gpu::resolve_policy`]:
+/// the flag, `LIGHTCRAFT_GPU`, the app's saved setting, Automatic; its crash markers) and apply it
+/// before anything can create a device. Force GPU without a usable device is an error here, before
+/// any work.
+fn apply_gpu(flag: Option<GpuPolicy>, who: &str) -> Result<(), String> {
+    let saved = lightcraft_engine::config::saved_gpu_policy();
+    let crash = lightcraft_engine::config::gpu_crash_marker();
+    let r = lightcraft_engine::gpu::resolve_policy(flag, saved, crash.as_deref()).map_err(|e| format!("{who}: {e}"))?;
+    if let Some(n) = &r.note {
+        eprintln!("lightcraft-cli {who}: {n}");
+    }
+    lightcraft_engine::gpu::set_policy(r.policy);
+    if r.policy == GpuPolicy::Force && !lightcraft_engine::gpu::available() {
+        let why = lightcraft_engine::gpu::unavailable_reason().unwrap_or_else(|| "no device".into());
+        return Err(format!("{who}: the GPU is required (gpu, from {}), but there is no usable GPU: {why}", r.source));
+    }
+    Ok(())
+}
+
 /// The port an `--connect` address names, for the recovery hint. The whole address when it has
 /// no port, so a hint is never built from a guess.
 fn connect_port(addr: &str) -> &str {
@@ -676,9 +739,21 @@ fn render(args: &[String]) -> Result<(), String> {
     let mut size: Option<u64> = None;
     let mut quality = 92u8;
     let mut opts = serde_json::Map::new();
+    let mut gpu: Option<GpuPolicy> = None;
+    let mut dump: Option<(String, String)> = None;
     let mut i = 0;
     while i < args.len() {
+        if let Some(p) = gpu_option(args, &mut i)? {
+            gpu = Some(p);
+            i += 1;
+            continue;
+        }
         match args[i].as_str() {
+            "--dump-stage" => {
+                let kv = take_value(args, &mut i, "--dump-stage")?;
+                let (k, v) = kv.split_once('=').ok_or_else(|| format!("--dump-stage expects NAME=DIR, got `{kv}`"))?;
+                dump = Some((k.trim().to_string(), v.to_string()));
+            }
             "-o" | "--output" => output = Some(take_value(args, &mut i, "-o")?.to_string()),
             "--set" => {
                 let kv = take_value(args, &mut i, "--set")?;
@@ -703,6 +778,18 @@ fn render(args: &[String]) -> Result<(), String> {
     }
     let input = input.ok_or("render: missing input file")?;
     let output = output.ok_or("render: missing -o OUTPUT")?;
+    // a stage dump is the CPU pipeline's buffers: the render runs on the CPU
+    if let Some((name, _)) = &dump {
+        if !lightcraft_engine::pipeline::stage_hook::STAGES.contains(&name.as_str()) {
+            return Err(format!("--dump-stage: unknown stage `{name}` (one of {})", lightcraft_engine::pipeline::stage_hook::STAGES.join(", ")));
+        }
+        if gpu == Some(GpuPolicy::Force) {
+            return Err("--dump-stage renders on the CPU; it can't be combined with --gpu gpu".into());
+        }
+        gpu = Some(GpuPolicy::Disable);
+    }
+    apply_gpu(gpu, "render")?;
+    let capture = dump.as_ref().map(|(name, _)| lightcraft_engine::pipeline::stage_hook::Capture::install(name));
     let mut s = Session::new().with_fs().with_default_denoise_models().with_system_clock();
     let abs = expand_paths(std::slice::from_ref(&input));
     let r = s.execute("library.import", &json!({"paths": abs})).map_err(|e| e.to_string())?;
@@ -755,6 +842,10 @@ fn render(args: &[String]) -> Result<(), String> {
         eprintln!("lightcraft-cli: wrote {sc}");
     }
     eprintln!("lightcraft-cli: wrote {output} ({}×{})", e.width, e.height);
+    if let (Some(c), Some((_, dir))) = (capture, &dump) {
+        let written = c.write_largest(Path::new(dir)).map_err(|err| format!("--dump-stage: {err}"))?;
+        eprintln!("lightcraft-cli: wrote stage {}", written.display());
+    }
     if let Some(photos) = after.run(&[json!({"path": output})], false) {
         if let Some(err) = photos.get("error").and_then(Value::as_str) {
             return Err(format!("render: {output} was written, but {err}"));
@@ -786,6 +877,9 @@ fn snapshot(args: &[String]) -> Result<(), String> {
                 size = [w.trim().parse().map_err(|_| "--size: bad width")?, h.trim().parse().map_err(|_| "--size: bad height")?];
             }
             "--scale" => scale = take_value(args, &mut i, "--scale")?.parse().map_err(|_| "--scale expects a number")?,
+            a if a == "--cpu" || a == "--gpu" || a.starts_with("--gpu=") => {
+                return Err("snapshot always renders on the CPU (CPU-rasterized UI); --gpu/--cpu don't apply".into());
+            }
             a if a.starts_with('-') => return Err(format!("unknown option `{a}`")),
             f => files.push(f.to_string()),
         }
