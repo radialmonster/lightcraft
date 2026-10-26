@@ -618,9 +618,10 @@ pub fn sharpen_sigma_raw(s: &DevelopSettings, px_per_long: f64, native_long: f64
     (radius * px_per_long / native_long.max(1.0)) as f32
 }
 
-/// Smallest and largest sigma (px) of the sharpening blur.
+/// Smallest and largest sigma (px) of the sharpening blur. The largest is the most the Gaussian taps
+/// support (CPU and GPU share them), so an enlarging export keeps every Radius step distinct.
 pub const SHARPEN_SIGMA_MIN: f32 = 0.5;
-pub const SHARPEN_SIGMA_MAX: f32 = 4.0;
+pub const SHARPEN_SIGMA_MAX: f32 = lightcraft_raster::blur::GAUSS_SIGMA_MAX;
 
 /// The sharpening blur's sigma for a raw value of [`sharpen_sigma_raw`].
 pub fn sharpen_sigma(raw: f32) -> f32 {

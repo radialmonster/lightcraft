@@ -249,3 +249,18 @@ fn local_sharpness_uses_the_sharpen_band() {
     s.detail.sharpen_radius = 3.0;
     assert_ne!(render_at(&src, &s, 256).data, with.data, "Radius reaches the local sharpness band");
 }
+
+/// An enlarging export (2× the original) scales Radius 2 and 3 to 4 and 6 px: they stay distinct
+/// rather than meeting at a 4 px cap.
+#[test]
+fn enlarged_export_keeps_radius_steps_apart() {
+    use crate::Quality;
+    use crate::local::plane_sigmas;
+    let sigma = |r: f64| plane_sigmas(&sharp(100.0, r, 0.0, 0.0), 1024.0, 512.0, Quality::Full).sharpen.unwrap();
+    assert_eq!((sigma(2.0), sigma(3.0)), (4.0, 6.0));
+    let src = scene(128);
+    let enlarged = SourceInfo { native_long: Some(64), ..info() };
+    let at = |r: f64| render(&src, &enlarged, &sharp(100.0, r, 0.0, 0.0), &RenderRequest::fit(128, 128)).image;
+    let d = rms(&at(2.0), &at(3.0));
+    assert!(d > 0.1, "Radius 2 and 3 render alike at 2x: {d}");
+}

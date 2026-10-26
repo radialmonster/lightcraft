@@ -126,12 +126,16 @@ pub fn gaussian<T: Pixel>(img: &Image<T>, sigma: f32) -> Image<T> {
     a
 }
 
+/// Largest sigma [`gauss_taps`] makes taps for (larger ones are clamped to it). The GPU blur reads
+/// the same taps, so it is the limit of both paths.
+pub const GAUSS_SIGMA_MAX: f32 = 64.0;
+
 /// Normalized Gaussian taps `[w(-r) .. w(r)]` for `sigma`, `r = ceil(3 sigma)`.
 ///
 /// An exact kernel, unlike the three-box approximation of [`gaussian`], which cannot represent
 /// a sigma under about 0.8 px (its boxes collapse to the identity): sharpening needs those.
 pub fn gauss_taps(sigma: f32) -> Vec<f32> {
-    let sigma = if sigma.is_nan() { 0.05 } else { sigma.clamp(0.05, 64.0) };
+    let sigma = if sigma.is_nan() { 0.05 } else { sigma.clamp(0.05, GAUSS_SIGMA_MAX) };
     let r = (3.0 * sigma).ceil() as i32;
     let k = -0.5 / (sigma * sigma);
     let mut t: Vec<f32> = (-r..=r).map(|i| ((i * i) as f32 * k).exp()).collect();
