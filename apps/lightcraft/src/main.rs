@@ -164,7 +164,7 @@ fn gpu_crash_check_at(marker: Option<std::path::PathBuf>, in_memory: bool) -> Op
 fn gpu_crash_notice(what: &str) -> String {
     format!(
         "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. \
-         To try the GPU again, set Settings ▸ Performance ▸ Use the GPU for rendering to Automatic; to try another graphics backend, start LightCraft with \
+         To try the GPU again, set Settings → Performance → Use the GPU for rendering to Automatic; to try another graphics backend, start LightCraft with \
          LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off (see docs/gpu-pipeline.md → Troubleshooting)."
     )
 }
@@ -203,7 +203,7 @@ fn gpu_lost_check_at(marker: Option<&std::path::Path>, in_memory: bool) -> Optio
     }
     Some(format!(
         "LightCraft stopped last time after the graphics driver reset the GPU ({}) while photos rendered on it, so GPU rendering \
-         is now off and photos render on the CPU. To try the GPU again, set Settings ▸ Performance ▸ Use the GPU for rendering to Automatic; \
+         is now off and photos render on the CPU. To try the GPU again, set Settings → Performance → Use the GPU for rendering to Automatic; \
          an up-to-date graphics driver may help.",
         reason.trim()
     ))
@@ -917,9 +917,11 @@ fn main() -> eframe::Result {
                 match lightcraft_engine::gpu::GpuPolicy::parse(&v) {
                     Some(p) => gpu_flag = Some(p),
                     None => {
-                        eprintln!("lightcraft: --gpu takes auto, gpu or cpu (got `{v}`)
+                        eprintln!(
+                            "lightcraft: --gpu takes auto, gpu or cpu (got `{v}`)
 
-{HELP}");
+{HELP}"
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -1164,7 +1166,7 @@ fn stopped_text(error: &str, lost: Option<&str>) -> String {
     match lost {
         Some(reason) => format!(
             "{error}. The graphics driver reset the GPU ({reason}). LightCraft renders on the CPU from its next start; \
-             setting Settings ▸ Performance ▸ Use the GPU for rendering to Automatic turns the GPU back on"
+             setting Settings → Performance → Use the GPU for rendering to Automatic turns the GPU back on"
         ),
         None => error.to_string(),
     }

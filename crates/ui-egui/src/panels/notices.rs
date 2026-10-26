@@ -20,7 +20,7 @@ pub fn logic(app: &mut LightcraftApp) {
             let reason = gpu::unavailable_reason();
             if app.gpu_applied == Some(gpu::GpuPolicy::Force) {
                 app.notices.push(crate::i18n::tr_format!(
-                    "Settings ▸ Performance says Always use the GPU, but no GPU can be used ({why}), so photos won't render. Choose Automatic to render on the CPU.",
+                    "Settings → Performance says Always use the GPU, but no GPU can be used ({why}), so photos won't render. Choose Automatic to render on the CPU.",
                     why = reason.as_deref().unwrap_or("no device")
                 ));
             } else {

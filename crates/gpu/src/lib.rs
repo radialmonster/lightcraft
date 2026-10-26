@@ -25,7 +25,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod policy;
-pub use policy::{env_policy, forced, policy, resolve_policy, set_policy, GpuPolicy, Resolved};
+pub use policy::{GpuPolicy, Resolved, env_policy, forced, policy, resolve_policy, set_policy};
 use std::sync::{Arc, Mutex};
 
 use lightcraft_develop::DevelopSettings;

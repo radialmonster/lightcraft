@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn a_crash_turns_auto_off_and_stops_force() {
-        let r = resolve_with(None, None, None, Some("device lost")).unwrap_or_else(|e| unreachable_ok(e));
+        let r = resolve_with(None, None, None, Some("device lost")).unwrap_or_else(unreachable_ok);
         assert_eq!((r.policy, r.source.as_str()), (Disable, "crash marker"));
         assert!(resolve_with(Some(Force), None, None, Some("device lost")).is_err());
         assert_eq!(resolve_with(None, None, Some(Disable), Some("x")).map(|r| r.policy), Ok(Disable));

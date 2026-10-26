@@ -607,7 +607,9 @@ fn run(args: &[String]) -> Result<(), String> {
         match connect {
             Some(addr) => {
                 if demo || library.is_some() || !imports.is_empty() || gpu.is_some() {
-                    return Err("--demo, --library, --import and --gpu/--cpu apply to headless mode only (the app renders with its own GPU setting)".into());
+                    return Err(
+                        "--demo, --library, --import and --gpu/--cpu apply to headless mode only (the app renders with its own GPU setting)".into()
+                    );
                 }
                 Box::new(Remote::connect(&addr).map_err(|e| {
                     format!("LightCraft is not reachable at {addr} ({e}); start it with `lightcraft --control {}`", connect_port(&addr))

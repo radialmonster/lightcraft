@@ -1618,11 +1618,14 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                         None => "none (CPU rendering)".into(),
                     }),
                 ),
-                ("GPU rendering".to_string(), match app.ui.settings.gpu_policy() {
-                    lightcraft_engine::gpu::GpuPolicy::Auto => "automatic".into(),
-                    lightcraft_engine::gpu::GpuPolicy::Force => "always (Force GPU)".into(),
-                    lightcraft_engine::gpu::GpuPolicy::Disable => "off".into(),
-                }),
+                (
+                    "GPU rendering".to_string(),
+                    match app.ui.settings.gpu_policy() {
+                        lightcraft_engine::gpu::GpuPolicy::Auto => "automatic".into(),
+                        lightcraft_engine::gpu::GpuPolicy::Force => "always (Force GPU)".into(),
+                        lightcraft_engine::gpu::GpuPolicy::Disable => "off".into(),
+                    },
+                ),
                 ("Memory budget".to_string(), mb(lightcraft_engine::memory::default_budget() as u64)),
                 (
                     "Preview size".to_string(),

@@ -1142,7 +1142,13 @@ pub fn cpu_only_reason(s: &DevelopSettings, req: &RenderRequest) -> Option<&'sta
 
 /// [`develop_reporting`] under Force GPU: the GPU's image, or an error that says why there is none
 /// (never a CPU render).
-fn develop_forced(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &RenderRequest, stages: Option<&StageCache>) -> Result<Rendered, String> {
+fn develop_forced(
+    src: &Arc<Rgb32f>,
+    info: &SourceInfo,
+    s: &DevelopSettings,
+    req: &RenderRequest,
+    stages: Option<&StageCache>,
+) -> Result<Rendered, String> {
     if let Some(why) = cpu_only_reason(s, req) {
         return Err(format!("Force GPU is on, but this render can't run on the GPU: {why}. Set the GPU to Automatic to render it on the CPU."));
     }

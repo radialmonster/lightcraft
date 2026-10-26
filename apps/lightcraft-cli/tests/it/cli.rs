@@ -454,7 +454,7 @@ fn snapshot_defaults_to_cpu_without_gpu_environment_overrides() {
     assert_eq!(gpu["enabled"], false, "{gpu}");
     assert_eq!(gpu["available"], false, "{gpu}");
     assert_eq!(gpu["adapter"], Value::Null, "no device is created: {gpu}");
-    assert!(gpu["reason"].as_str().is_some_and(|reason| reason.contains("preference")), "{gpu}");
+    assert!(gpu["reason"].as_str().is_some_and(|reason| reason.contains("GPU setting")), "{gpu}");
     let decoded = lightcraft_codecs::decode(&std::fs::read(image).unwrap(), Default::default()).unwrap();
     assert_eq!((decoded.width, decoded.height), (480, 320));
 }
