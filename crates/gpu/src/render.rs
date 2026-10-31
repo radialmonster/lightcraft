@@ -821,8 +821,9 @@ pub fn render(
     let overlay_mask = overlay_mask.or_else(|| {
         req.overlay.reads_detail().then(|| {
             let l = host.log_l.get_or_insert_with(|| Arc::new(cx.read_plane(&prep.log_l, w, h))).clone();
-            let tex = prep.texture.as_deref().map(|b| cx.read_plane(b, w, h));
-            lightcraft_pipeline::visualize::sharpen_plane(req.overlay, &plan.settings, &l, tex.as_ref(), plan.px_per_long)
+            let band = if local::pixel_sharpen(&plan.settings) { &prep.sharpen } else { &prep.texture };
+            let blur = band.as_deref().map(|b| cx.read_plane(b, w, h));
+            lightcraft_pipeline::visualize::sharpen_plane(req.overlay, &plan.settings, &l, blur.as_ref(), plan.px_per_long, plan.native_long as f64)
         })?
     });
     lightcraft_pipeline::visualize::apply(&mut image, req.overlay, &plan, overlay_mask.as_ref(), all_overlay_alphas.as_deref());

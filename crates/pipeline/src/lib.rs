@@ -704,7 +704,8 @@ pub fn color_range_sample(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings, 
 /// (the one the render evaluated, or for a hidden mask a fresh evaluation).
 fn overlay_alpha(o: Overlay, plan: &Plan<'_>, prep: &Prepared) -> Option<Plane> {
     if o.reads_detail() {
-        return visualize::sharpen_plane(o, &plan.settings, &prep.log_l, prep.texture_blur.as_deref(), plan.px_per_long);
+        let band = if local::pixel_sharpen(&plan.settings) { &prep.sharpen_blur } else { &prep.texture_blur };
+        return visualize::sharpen_plane(o, &plan.settings, &prep.log_l, band.as_deref(), plan.px_per_long, plan.native_long as f64);
     }
     let m = o.mask(&plan.settings)?;
     if let Some(e) = prep.masks.iter().find(|e| e.id == m.id) {

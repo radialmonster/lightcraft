@@ -29,6 +29,12 @@ pub fn sharpen_mask_weight(masking: f32, det: f32) -> f32 {
     if masking > 0.0 { smooth(masking * 0.25, masking * 0.25 + 0.15, det.abs()) } else { 1.0 }
 }
 
+/// Masking weight for the V3 pixel-scale sharpening band, also used by its Alt-drag preview.
+#[inline]
+pub fn pixel_sharpen_mask_weight(masking: f32, det: f32) -> f32 {
+    if masking > 0.0 { smooth(masking * 0.1, masking * 0.1 + 0.06, det.abs()) } else { 1.0 }
+}
+
 /// Gain of the sharpening detail term (per unit of `Amount / 150`), in stops of luminance per stop of detail.
 pub const SHARPEN_GAIN: f32 = 7.0;
 
@@ -44,7 +50,7 @@ pub fn sharpen_limit(detail: f64) -> f32 {
 /// mask (`mask` = Masking / 100) so flat areas and noise can be left alone.
 #[inline]
 pub fn sharpen_term(det: f32, limit: f32, mask: f32) -> f32 {
-    let m = if mask > 0.0 { smooth(mask * 0.1, mask * 0.1 + 0.06, det.abs()) } else { 1.0 };
+    let m = pixel_sharpen_mask_weight(mask, det);
     SHARPEN_GAIN * m * det / (1.0 + det.abs() / limit)
 }
 
